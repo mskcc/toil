@@ -397,7 +397,7 @@ the following example::
         options = Job.Runner.getDefaultOptions("./toilWorkflowRun")
         options.logLevel = "INFO"
         Job.Runner.startToil(j1, options)
-    
+
 Running this workflow results in three log messages from the jobs: ``i is 1``
 from ``j1``, ``i is 2`` from ``j2`` and ``i is 3`` from ``j3``.
 
@@ -597,6 +597,80 @@ Example::
             toil.exportFile(outputFileID, 'file:///some/other/local/path')
 
 .. _service-dev-ref:
+
+Developing pipelines with toil-lib
+----------------------------------
+
+`toil-lib`_ provides many functions and job functions that are useful in
+developing pipelines in Toil. Installation instructions for toil-lib are
+available `here`_.
+
+.. _toil-lib: https://github.com/BD2KGenomics/toil-lib
+
+.. _here: https://github.com/BD2KGenomics/toil-lib/blob/master/docs/installation.rst
+
+toil-lib packages and functions can be imported to a Toil pipeline like any
+Python package. Jobs from toil-lib can then be added to workflows statically or
+dynamically. For example::
+
+    from toil.job import Job
+    from toil_lib.urls import download_url
+
+    def file_length(job, filename):
+        contents = open(filename).read()
+        job.fileStore.logToMaster("File length is: %s" % len(contents))
+        
+    download = Job.wrapJobFn(download_url, "https://some.url", work_dir="/data/", name="sample.txt")
+    download.addChildJobFn(file_length, "/data/sample.txt")
+
+    if __name__=="__main__":
+        options = Job.Runner.getDefaultOptions("./toilWorkflowRun")
+        options.logLevel = "INFO"
+        Job.Runner.startToil(download, options)
+
+
+Using Docker containers in Toil
+-------------------------------
+
+Docker containers are commonly used with Toil to maintain the portability of
+workflows. In order to use Docker containers with Toil, Docker must be installed
+on all workers of  cluster in order to run a workflow involving Docker containers.
+Instructions for installing Docker can be found on the `Docker`_ website. 
+
+.. _Docker: https://docs.docker.com/engine/getstarted/step_one/
+
+When using Toil-based autoscaling, Docker will be automatically set up on the cluster,
+so no additional installation steps are necessary. Further information on using
+autoscaling can be found `here`_.
+
+.. _here: https://github.com/BD2KGenomics/toil/blob/master/docs/running.rst
+
+`cgl-docker-lib`_ contains Toil-compatible Dockerized tools that are commonly
+used in bioinformatics analysis, as well as documentation on how to develop
+your own Toil-compatible Docker containers.
+
+.. _cgl-docker-lib: https://github.com/BD2KGenomics/cgl-docker-lib/blob/master/README.md
+
+When invoking docker containers from within a Toil workflow, it is recommended that you use
+``docker_call``, a toil job function provided in ``toil-lib.programs``. ``docker_call``
+provides a layer of abstraction over using the ``subprocess`` module to call Docker directly,
+and simplifies and streamlines the development process by providing:
+
+- container cleanup on job failure
+- ability to test workflows in 'mock mode', which runs the workflow without invoking Dockerized
+tools. An example of a pipeline that provides 'mock mode' functionality is the ADAM/GATK variant
+calling `pipeline`_.
+
+.. _pipeline: https://github.com/BD2KGenomics/toil-scripts/blob/master/src/toil_scripts/adam_gatk_pipeline/align_and_call.py
+
+Documentation for ``docker_call`` can be found in `toil-lib`_. In order to use ``docker_call``,
+your installation of Docker must be set up to run without ``sudo``. Instructions for setting
+this up can be found here_.
+
+.. _toil-lib: https://github.com/BD2KGenomics/toil-lib/blob/master/docs/docker.rst
+
+.. _here: https://docs.docker.com/engine/installation/linux/ubuntulinux/#/create-a-docker-group
+
 
 Services
 --------
