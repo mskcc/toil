@@ -378,7 +378,8 @@ class ModuleDescriptor(namedtuple('ModuleDescriptor', ('dirPath', 'name', 'fromV
                 dirPathTail = filePath.pop()
                 assert dirPathTail == package
             dirPath = os.path.sep.join(filePath)
-        assert os.path.isdir(dirPath)
+        require(os.path.isdir(dirPath),
+                'Bad directory path %s for module %s. Maybe it contains egg-links?', dirPath, name)
         fromVirtualEnv = inVirtualEnv() and dirPath.startswith(sys.prefix)
         return cls(dirPath=dirPath, name=name, fromVirtualEnv=fromVirtualEnv)
 
