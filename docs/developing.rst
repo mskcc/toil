@@ -651,6 +651,12 @@ your own Toil-compatible Docker containers.
 
 .. _cgl-docker-lib: https://github.com/BD2KGenomics/cgl-docker-lib/blob/master/README.md
 
+In order to use docker containers in a Toil workflow, the container can be built locally or
+downloaded in real time from an online docker repository like Quay_. If the container is local,
+it must be build on each node of the cluster.
+
+.. _Quay: quay.io
+
 When invoking docker containers from within a Toil workflow, it is recommended that you use
 ``docker_call``, a toil job function provided in ``toil-lib.programs``. ``docker_call``
 provides a layer of abstraction over using the ``subprocess`` module to call Docker directly,
@@ -663,13 +669,38 @@ calling `pipeline`_.
 
 .. _pipeline: https://github.com/BD2KGenomics/toil-scripts/blob/master/src/toil_scripts/adam_gatk_pipeline/align_and_call.py
 
-Documentation for ``docker_call`` can be found in `toil-lib`_. In order to use ``docker_call``,
-your installation of Docker must be set up to run without ``sudo``. Instructions for setting
-this up can be found here_.
-
-.. _toil-lib: https://github.com/BD2KGenomics/toil-lib/blob/master/docs/docker.rst
+In order to use ``docker_call``, your installation of Docker must be set up to run
+without ``sudo``. Instructions for setting this up can be found here_.
 
 .. _here: https://docs.docker.com/engine/installation/linux/ubuntulinux/#/create-a-docker-group
+
+``docker_call`` takes the full name of the dockerized tool, such as ``quay.io/ucsc_cgl/samtools``,
+parameters to be passed to the tool (``parameters``), environment variables to be set inside the
+container (``env``), and parameters to be passed to docker (``docker_parameters``). In addition,
+docker_call has several input variables specifying how the container should be run, including
+whether it should be run detached, if directories should be mounted to it, and what should happen
+to the container upon job completion. Docker's output can be returned by docker call or directed
+into a file. An example of a basic ``docker_call`` is below:
+
+    docker_call(job=job,
+                tool='quay.io/ucsc_cgl/bwa',
+                work_dir=job.fileStore.getLocalTempDir(),
+                parameters=['index', '/data/reference.fa'])
+
+To enable mock mode functionality within a pipeline, set the `inputs` and `outputs` variables to docker_call.
+When docker_call is run in mock mode, it will verify the existence of the files listed in `inputs`, and fabricate
+the `outputs` variables by either downloading the mock output file specified in the outputs dictionary, or creating
+an empty file with the correct output name. The pipeline can then be run in mock mode by setting the environment
+variable `TOIL_SCRIPTS_MOCK_MODE=1`. In the example above, BWA index takes in ``ref.fa`` and outputs five files
+(``ref.fa.amb``,``ref.fa.ann``, ``ref.fa.bwt``, ``ref.fa.pac``, ``ref.fa.sa``). The ``docker_call`` command can then be
+modified to make it mock_mode compatible:
+
+    docker_call(job=job,
+                tool='quay.io/ucsc_cgl/bwa',
+                work_dir=job.fileStore.getLocalTempDir(),
+                parameters=['index', '/data/reference.fa'],
+                inputs=['/data/reference.fa'],
+                outputs={'ref.fa.amb': None, 'ref.fa.ann': None, 'ref.fa.bwt': None, 'ref.fa.pac': None, 'ref.fa.sa': None})
 
 
 Services
