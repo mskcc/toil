@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 from argparse import ArgumentParser
+from threading import Thread
 
 from bd2k.util.exceptions import require
 from bd2k.util.humanize import bytes2human
@@ -39,7 +40,7 @@ unixBlockSize = 512
 
 class Config(object):
     """
-    Class to represent configuration operations for a toil workflow run. 
+    Class to represent configuration operations for a toil workflow run.
     """
     def __init__(self):
         # Core options
@@ -58,6 +59,7 @@ class Config(object):
         # the clean default value depends the specified stats option and is determined in setOptions
         self.clean = None
         self.cleanWorkDir = None
+        self.clusterStats = None
 
         #Restarting the workflow options
         self.restart = False
@@ -107,7 +109,9 @@ class Config(object):
 
         #Misc
         self.disableCaching = False
-        self.maxLogFileSize=50120
+        self.maxLogFileSize = 64000
+        self.writeLogs = None
+        self.writeLogsGzip = None
         self.sseKey = None
         self.cseKey = None
         self.servicePollingInterval = 60
@@ -185,6 +189,7 @@ class Config(object):
             self.clean = "never"
         elif self.clean is None:
             self.clean = "onSuccess"
+        setOption('clusterStats')
 
         #Restarting the workflow options
         setOption("restart")
@@ -240,6 +245,9 @@ class Config(object):
         #Misc
         setOption("disableCaching")
         setOption("maxLogFileSize", h2b, iC(1))
+        setOption("writeLogs")
+        setOption("writeLogsGzip")
+
         def checkSse(sseKey):
             with open(sseKey) as f:
                 assert(len(f.readline().rstrip()) == 32)
@@ -302,6 +310,13 @@ def _addOptions(addGroupFn, config):
                 help=("Determines deletion of temporary worker directory upon completion of a job. Choices: 'always', "
                       "'never', 'onSuccess'. Default = always. WARNING: This option should be changed for debugging "
                       "only. Running a full pipeline with this option could fill your disk with intermediate data."))
+    addOptionFn("--clusterStats", dest="clusterStats", nargs='?', action='store',
+                default=None, const=os.getcwd(),
+                help="If enabled, writes out JSON resource usage statistics to a file. "
+                     "The default location for this file is the current working directory, "
+                     "but an absolute path can also be passed to specify where this file "
+                     "should be written. This options only applies when using scalable batch "
+                     "systems.")
     #
     #Restarting the workflow options
     #
@@ -480,9 +495,22 @@ def _addOptions(addGroupFn, config):
                      'a batch system that does not support caching such as Grid Engine, Parasol, '
                      'LSF, or Slurm')
     addOptionFn("--maxLogFileSize", dest="maxLogFileSize", default=None,
-                      help=("The maximum size of a job log file to keep (in bytes), log files larger "
-                            "than this will be truncated to the last X bytes. Default is 50 "
-                            "kilobytes, default=%s" % config.maxLogFileSize))
+                help=("The maximum size of a job log file to keep (in bytes), log files "
+                      "larger than this will be truncated to the last X bytes. Setting "
+                      "this option to zero will prevent any truncation. Setting this "
+                      "option to a negative value will truncate from the beginning."
+                      "Default=%s" % bytes2human(config.maxLogFileSize)))
+    addOptionFn("--writeLogs", dest="writeLogs", nargs='?', action='store',
+                default=None, const=os.getcwd(),
+                help="Write worker logs received by the leader into their own files at the "
+                     "specified path. The current working directory will be used if a path is "
+                     "not specified explicitly. Note: By default "
+                     "only the logs of failed jobs are returned to leader. Set log level to "
+                     "'debug' to get logs back from successful jobs, and adjust 'maxLogFileSize' "
+                     "to control the truncation limit for worker logs.")
+    addOptionFn("--writeLogsGzip", dest="writeLogsGzip", nargs='?', action='store',
+                default=None, const=os.getcwd(),
+                help="Identical to --writeLogs except the logs files are gzipped on the leader.")
     addOptionFn("--realTimeLogging", dest="realTimeLogging", action="store_true", default=False,
                 help="Enable real-time logging from workers to masters")
 
@@ -832,9 +860,36 @@ class Toil(object):
         if userScript is None:
             logger.info('No user script to hot-deploy.')
         else:
-            logger.info('Saving user script %s as a resource', userScript)
+            logger.debug('Saving user script %s as a resource', userScript)
             userScriptResource = userScript.saveAsResourceTo(self._jobStore)
-            logger.info('Hot-deploying user script resource %s.', userScriptResource)
+            logger.debug('Injecting user script %s into batch system.', userScriptResource)
+            self._batchSystem.setUserScript(userScriptResource)
+            thread = Thread(target=self._refreshUserScript,
+                            name='refreshUserScript',
+                            kwargs=dict(userScriptResource=userScriptResource))
+            thread.daemon = True
+            thread.start()
+
+    def _refreshUserScript(self, userScriptResource):
+        """
+        Periodically refresh the user script in the job store to prevent credential
+        expiration from causing the public URL to the user script to expire.
+        """
+        while True:
+            # Boto refreshes IAM credentials if they will be expiring within the next five
+            # minutes, but it will only check the expiry if and when credentials are needed to
+            # sign an actual AWS request. This means that we should be refreshing the user script
+            # at least every 5 minutes. Note that refreshing the user script in the job store
+            # involves an S3 request requiring credentials and therefore also triggers refreshing
+            # the IAM role credentials. In the worst case, refresh() is called 5 minutes plus
+            # epsilon before IAM credential expiration. The resource is refreshed three minutes
+            # after that, leaving two minutes plus epsilon generating a new signed URL, this time
+            # with refreshed IAM role credentials. This consideration only applies to AWS and
+            # Boto2, of course. See https://github.com/BD2KGenomics/toil/issues/1372.
+            time.sleep(3 * 60)
+            logger.debug('Refreshing user script resource %s.', userScriptResource)
+            userScriptResource = userScriptResource.refresh(self._jobStore)
+            logger.debug('Injecting refreshed user script %s into batch system.', userScriptResource)
             self._batchSystem.setUserScript(userScriptResource)
 
     def importFile(self, srcUrl, sharedFileName=None):
@@ -912,7 +967,7 @@ class Toil(object):
         :param toil.job.Job rootJob: The root job for the workflow.
         :rtype: Any
         """
-        logProcessContext(self.config, logger)
+        logProcessContext(self.config)
 
         with RealtimeLogger(self._batchSystem,
                             level=self.options.logLevel if self.options.realTimeLogging else None):

@@ -26,7 +26,10 @@ dependencies = ' '.join(['libffi-dev',  # For client side encryption for 'azure'
                          'libssl-dev',
                          'wget',
                          'curl',
-                         'mesos=1.0.0-2.0.89.ubuntu1404'])
+                         'openssh-server',
+                         'mesos=1.0.0-2.0.89.ubuntu1404',
+                         'rsync',
+                         'screen'])
 
 
 def heredoc(s):
@@ -61,6 +64,13 @@ print heredoc('''
         && apt-get -y install {dependencies} \
         && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+    RUN mkdir /root/.ssh && \
+        chmod 700 /root/.ssh
+
+    ADD waitForKey.sh /usr/bin/waitForKey.sh
+
+    RUN chmod 777 /usr/bin/waitForKey.sh
+
     # The stock pip is too old and can't install from sdist with extras
     RUN pip install --upgrade pip==8.1.2
 
@@ -75,7 +85,7 @@ print heredoc('''
     # Install statically linked version of docker client
     RUN wget -O /usr/bin/docker https://get.docker.com/builds/Linux/x86_64/docker-1.10.3 \
         && chmod +x /usr/bin/docker
-    
+
     # Fix for Mesos interface dependency missing on ubuntu
     RUN pip install protobuf==3.0.0
 
@@ -84,6 +94,9 @@ print heredoc('''
 
     # Fix for https://issues.apache.org/jira/browse/MESOS-3793
     ENV MESOS_LAUNCHER=posix
+
+    # Fix for `screen` (https://github.com/BD2KGenomics/toil/pull/1386#issuecomment-267424561)
+    ENV TERM linux
 
     # An appliance may need to start more appliances, e.g. when the leader appliance launches the
     # worker appliance on a worker node. To support this, we embed a self-reference into the image:
