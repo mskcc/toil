@@ -32,10 +32,16 @@ logger = logging.getLogger( __name__ )
 
 
 
-def prepareBsub(cpu, mem):
-    mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem/ 1000000)) + '] rusage[mem=' + str(int(mem/ 1000000)) + ']" -M' + str(int(mem/ 1000000)) + '000'
+def prepareBsub(cpu, mem, name):
+    #for some reason default has 3 extra digits, just take them off beforehand for now
+    #FIXME HAX
+    if len(str(mem)) >= 10:
+        mem = int(mem) / 1000
+    print cpu, mem
+    mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
     cpu = '' if cpu is None else '-n ' + str(int(cpu))
-    bsubline = ["bsub", mem, cpu,"-cwd", ".", "-o", "/dev/null", "-e", "/dev/null"]
+    name = '' if name is None else '-J ' + name
+    bsubline = ["bsub", mem, cpu, name, "-cwd", ".", "-o", "/dev/null", "-e", "/dev/null"]
     return bsubline
 
 def bsub(bsubline):
@@ -54,6 +60,8 @@ def getjobexitcode(lsfJobID):
         logger.debug("Checking job exit code for job via bjobs: " + str(job))
         process = subprocess.Popen(" ".join(args), shell=True, stdout = subprocess.PIPE, stderr = subprocess.STDOUT)
         started = 0
+        #this ignores line wraps and should not
+        #FIXME
         for line in process.stdout:
             if line.find("Done successfully") > -1:
                 logger.debug("bjobs detected job completed for job: " + str(job))
@@ -67,7 +75,7 @@ def getjobexitcode(lsfJobID):
             elif line.find("PENDING REASONS") > -1:
                 logger.debug("bjobs detected job pending for job: " + str(job))
                 return None
-            elif line.find("Started on ") > -1:
+            elif line.find("Status <RUN>") > -1:
                 started = 1
 
         if started == 1:
@@ -161,7 +169,7 @@ class LSFBatchSystem(BatchSystemSupport):
         jobID = self.nextJobID
         self.nextJobID += 1
         self.currentjobs.add(jobID)
-        bsubline = prepareBsub(jobNode.cores, jobNode.memory) + [jobNode.command]
+        bsubline = prepareBsub(jobNode.cores, jobNode.memory, jobNode.jobName) + [jobNode.command]
         self.newJobsQueue.put((jobID, bsubline))
         logger.debug("Issued the job command: %s with job id: %s " % (jobNode.command, str(jobID)))
         return jobID
@@ -244,7 +252,8 @@ class LSFBatchSystem(BatchSystemSupport):
         making it expensive. We allow this every 10 minutes..
         """
         return 1800
-
+    def shutdown(self):
+        pass 
     def obtainSystemConstants(self):
         p = subprocess.Popen(["lshosts"], stdout = subprocess.PIPE, stderr = subprocess.STDOUT)
 

@@ -40,6 +40,7 @@ import copy
 import shutil
 import functools
 import urlparse
+from pprint import pprint
 
 cwllogger = logging.getLogger("cwltool")
 
@@ -227,6 +228,13 @@ class CWLJob(Job):
         #super(CWLJob, self).__init__()
         self.cwltool = tool
         self.cwljob = cwljob
+        try:
+            print tool.tool['baseCommand']
+            self.jobName=" ".join(tool.tool['baseCommand'])
+        except:
+            print "Failed to execute try"
+            self.jobName="Potato"
+
         self.executor_options = kwargs
 
     def run(self, fileStore):
