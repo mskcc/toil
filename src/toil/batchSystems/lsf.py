@@ -62,21 +62,23 @@ def getjobexitcode(lsfJobID):
         started = 0
         #this ignores line wraps and should not
         #FIXME
-        for line in process.stdout:
-            if line.find("Done successfully") > -1:
-                logger.debug("bjobs detected job completed for job: " + str(job))
-                return 0
-            elif line.find("Completed <exit>") > -1:
-                logger.debug("bjobs detected job failed for job: " + str(job))
-                return 1
-            elif line.find("New job is waiting for scheduling") > -1:
-                logger.debug("bjobs detected job pending scheduling for job: " + str(job))
-                return None
-            elif line.find("PENDING REASONS") > -1:
-                logger.debug("bjobs detected job pending for job: " + str(job))
-                return None
-            elif line.find("Status <RUN>") > -1:
-                started = 1
+        line = ""
+        for newline in process.stdout:
+            line += newline.strip()
+        if line.find("Done successfully") > -1:
+            logger.debug("bjobs detected job completed for job: " + str(job))
+            return 0
+        elif line.find("Completed <exit>") > -1:
+            logger.debug("bjobs detected job failed for job: " + str(job))
+            return 1
+        elif line.find("New job is waiting for scheduling") > -1:
+            logger.debug("bjobs detected job pending scheduling for job: " + str(job))
+            return None
+        elif line.find("PENDING REASONS") > -1:
+            logger.debug("bjobs detected job pending for job: " + str(job))
+            return None
+        elif line.find("Status <RUN>") > -1:
+            started = 1
 
         if started == 1:
             logger.debug("bjobs detected job started but not completed: " + str(job))
