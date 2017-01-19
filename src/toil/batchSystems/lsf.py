@@ -40,7 +40,7 @@ def prepareBsub(cpu, mem, name):
     print cpu, mem
     mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
     cpu = '' if cpu is None else '-n ' + str(int(cpu))
-    name = '' if name is None else '-J ' + name
+    name = '' if name is None else '-J ' + name.replace(" ","_")
     bsubline = ["bsub", mem, cpu, name, "-cwd", ".", "-o", "/dev/null", "-e", "/dev/null"]
     return bsubline
 
