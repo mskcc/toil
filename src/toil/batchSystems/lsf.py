@@ -37,7 +37,7 @@ def prepareBsub(cpu, mem, name):
     #FIXME HAX
     if len(str(mem)) >= 10:
         mem = int(mem) / 1000
-    print cpu, mem
+    logger.debug("Calculated %s cpus requested, %s mem" % (cpu, str(mem)))
     mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
     cpu = '' if cpu is None else '-n ' + str(int(cpu))
     name = '' if name is None else '-J ' + name.replace(" ","_")
