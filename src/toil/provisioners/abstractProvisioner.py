@@ -14,7 +14,6 @@
 import json
 import logging
 import os
-import threading
 from abc import ABCMeta, abstractmethod
 
 from collections import namedtuple
@@ -23,6 +22,7 @@ from itertools import islice
 
 import time
 
+from bd2k.util.retry import retry, never
 from bd2k.util.threading import ExceptionalThread
 
 from toil.batchSystems.abstractBatchSystem import AbstractScalableBatchSystem
@@ -59,6 +59,16 @@ class AbstractProvisioner(object):
         self.statsThreads = []
         self.statsPath = config.clusterStats
         self.scaleable = isinstance(self.batchSystem, AbstractScalableBatchSystem)
+
+    @staticmethod
+    def retryPredicate(e):
+        """
+        Return true if the exception e should be retried by the cluster scaler
+
+        :param e: exception raised during execution of setNodeCount
+        :return: boolean indicating whether the exception e should be retried
+        """
+        return never(e)
 
     def shutDown(self, preemptable):
         if not self.stop:
@@ -100,13 +110,15 @@ class AbstractProvisioner(object):
 
     def _gatherStats(self, preemptable):
         def toDict(nodeInfo):
-            # namedtuples don't retain attribute names when dumped to JSON.
-            # convert them to dicts instead to improve stats output. Also add
-            # time.
-            return dict(memory=nodeInfo.memory,
-                        cores=nodeInfo.cores,
+            # convert NodeInfo object to dict to improve JSON output
+            return dict(memory=nodeInfo.memoryUsed,
+                        cores=nodeInfo.coresUsed,
+                        memoryTotal=nodeInfo.memoryTotal,
+                        coresTotal=nodeInfo.coresTotal,
+                        requestedCores=nodeInfo.requestedCores,
+                        requestedMemory=nodeInfo.requestedMemory,
                         workers=nodeInfo.workers,
-                        time=time.time()
+                        time=time.time()  # add time stamp
                         )
         if self.scaleable:
             stats = {}
@@ -153,22 +165,24 @@ class AbstractProvisioner(object):
                 the `numNodes` argument. It represents the closest possible approximation of the
                 actual cluster size at the time this method returns.
         """
-        workerInstances = self._getWorkersInCluster(preemptable)
-        numCurrentNodes = len(workerInstances)
-        delta = numNodes - numCurrentNodes
-        if delta > 0:
-            log.info('Adding %i nodes to get to desired cluster size of %i.', delta, numNodes)
-            numNodes = numCurrentNodes + self._addNodes(workerInstances,
-                                                        numNodes=delta,
-                                                        preemptable=preemptable)
-        elif delta < 0:
-            log.info('Removing %i nodes to get to desired cluster size of %i.', -delta, numNodes)
-            numNodes = numCurrentNodes - self._removeNodes(workerInstances,
-                                                           numNodes=-delta,
-                                                           preemptable=preemptable,
-                                                           force=force)
-        else:
-            log.info('Cluster already at desired size of %i. Nothing to do.', numNodes)
+        for attempt in retry(predicate=self.retryPredicate):
+            with attempt:
+                workerInstances = self._getWorkersInCluster(preemptable)
+                numCurrentNodes = len(workerInstances)
+                delta = numNodes - numCurrentNodes
+                if delta > 0:
+                    log.info('Adding %i %s nodes to get to desired cluster size of %i.', delta, 'preemptable' if preemptable else 'non-preemptable', numNodes)
+                    numNodes = numCurrentNodes + self._addNodes(workerInstances,
+                                                                numNodes=delta,
+                                                                preemptable=preemptable)
+                elif delta < 0:
+                    log.info('Removing %i %s nodes to get to desired cluster size of %i.', -delta, 'preemptable' if preemptable else 'non-preemptable', numNodes)
+                    numNodes = numCurrentNodes - self._removeNodes(workerInstances,
+                                                                   numNodes=-delta,
+                                                                   preemptable=preemptable,
+                                                                   force=force)
+                else:
+                    log.info('Cluster already at desired size of %i. Nothing to do.', numNodes)
         return numNodes
 
     def _removeNodes(self, instances, numNodes, preemptable=False, force=False):
@@ -178,39 +192,48 @@ class AbstractProvisioner(object):
             nodes = self.batchSystem.getNodes(preemptable)
             # Join nodes and instances on private IP address.
             nodes = [(instance, nodes.get(instance.private_ip_address)) for instance in instances]
+            log.debug('Nodes considered to terminate: %s', ' '.join(map(str, nodes)))
             # Unless forced, exclude nodes with runnning workers. Note that it is possible for
             # the batch system to report stale nodes for which the corresponding instance was
             # terminated already. There can also be instances that the batch system doesn't have
             # nodes for yet. We'll ignore those, too, unless forced.
-            nodes = [(instance, nodeInfo)
-                     for instance, nodeInfo in nodes
-                     if force or nodeInfo is not None and nodeInfo.workers < 1]
+            nodesToTerminate = []
+            for instance, nodeInfo in nodes:
+                if force:
+                    nodesToTerminate.append((instance, nodeInfo))
+                elif nodeInfo is not None and nodeInfo.workers < 1:
+                    nodesToTerminate.append((instance, nodeInfo))
+                else:
+                    log.debug('Not terminating instances %s. Node info: %s', instance, nodeInfo)
             # Sort nodes by number of workers and time left in billing cycle
-            nodes.sort(key=lambda (instance, nodeInfo): (
+            nodesToTerminate.sort(key=lambda (instance, nodeInfo): (
                 nodeInfo.workers if nodeInfo else 1,
                 self._remainingBillingInterval(instance)))
-            nodes = nodes[:numNodes]
+            if not force:
+                # don't terminate nodes that still have > 15% left in their allocated (prepaid) time
+                nodesToTerminate = [nodeTuple for nodeTuple in nodesToTerminate if self._remainingBillingInterval(nodeTuple[0]) <= 0.15]
+            nodesToTerminate = nodesToTerminate[:numNodes]
             if log.isEnabledFor(logging.DEBUG):
-                for instance, nodeInfo in nodes:
+                for instance, nodeInfo in nodesToTerminate:
                     log.debug("Instance %s is about to be terminated. Its node info is %r. It "
                               "would be billed again in %s minutes.", instance.id, nodeInfo,
                               60 * self._remainingBillingInterval(instance))
-            instanceIds = [instance.id for instance, nodeInfo in nodes]
+            instances = [instance for instance, nodeInfo in nodesToTerminate]
         else:
             # Without load info all we can do is sort instances by time left in billing cycle.
             instances = sorted(instances, key=self._remainingBillingInterval)
-            instanceIds = [instance.id for instance in islice(instances, numNodes)]
-        log.info('Terminating %i instance(s).', len(instanceIds))
-        if instanceIds:
-            self._logAndTerminate(instanceIds)
-        return len(instanceIds)
+            instances = [instance for instance in islice(instances, numNodes)]
+        log.info('Terminating %i instance(s).', len(instances))
+        if instances:
+            self._logAndTerminate(instances)
+        return len(instances)
 
     @abstractmethod
     def _addNodes(self, instances, numNodes, preemptable):
         raise NotImplementedError
 
     @abstractmethod
-    def _logAndTerminate(self, instanceIDs):
+    def _logAndTerminate(self, instances):
         raise NotImplementedError
 
     @abstractmethod

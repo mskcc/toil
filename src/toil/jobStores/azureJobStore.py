@@ -15,18 +15,20 @@
 from __future__ import absolute_import
 
 import bz2
-import cPickle
-import httplib
 import inspect
 import logging
 import os
 import re
 import socket
 import uuid
-from ConfigParser import RawConfigParser, NoOptionError
 from collections import namedtuple
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+
+# Python 3 compatibility imports
+from six.moves import cPickle
+from six.moves.http_client import HTTPException
+from six.moves.configparser import RawConfigParser, NoOptionError
 
 from azure.common import AzureMissingResourceHttpError, AzureException
 from azure.storage import SharedAccessPolicy, AccessPolicy
@@ -163,6 +165,7 @@ class AzureJobStore(AbstractJobStore):
         super(AzureJobStore, self).resume()
 
     def destroy(self):
+        self._bind()
         for name in 'jobItems', 'jobFileIDs', 'files', 'statsFiles', 'statsFileIDs':
             resource = getattr(self, name)
             if resource is not None:
@@ -267,11 +270,19 @@ class AzureJobStore(AbstractJobStore):
                                account_key=_fetchAzureAccountKey(self.account))
 
     @classmethod
+    def getSize(cls, url):
+        blob = cls._parseWasbUrl(url)
+        blobProps = blob.service.get_blob_properties(blob.container, blob.name)
+        return int(blobProps['content-length'])
+
+    @classmethod
     def _readFromUrl(cls, url, writable):
         blob = cls._parseWasbUrl(url)
-        blob.service.get_blob_to_file(container_name=blob.container,
-                                      blob_name=blob.name,
-                                      stream=writable)
+        for attempt in retry_azure():
+            with attempt:
+                blob.service.get_blob_to_file(container_name=blob.container,
+                                              blob_name=blob.name,
+                                              stream=writable)
 
     @classmethod
     def _writeToUrl(cls, readable, url):
@@ -364,8 +375,10 @@ class AzureJobStore(AbstractJobStore):
 
     def getEmptyFileStoreID(self, jobStoreID=None):
         jobStoreFileID = self._newFileID()
-        self.files.put_blob(blob_name=jobStoreFileID, blob='',
-                            x_ms_blob_type='BlockBlob')
+        for attempt in retry_azure(timeout=45):
+            with attempt:
+                self.files.put_blob(blob_name=jobStoreFileID, blob='',
+                                    x_ms_blob_type='BlockBlob')
         self._associateFileWithJob(jobStoreFileID, jobStoreID)
         return jobStoreFileID
 
@@ -407,22 +420,24 @@ class AzureJobStore(AbstractJobStore):
     def readStatsAndLogging(self, callback, readAll=False):
         suffix = '_old'
         numStatsFiles = 0
-        for entity in self.statsFileIDs.query_entities():
-            jobStoreFileID = entity.RowKey
-            hasBeenRead = len(jobStoreFileID) > self.jobIDLength
-            if not hasBeenRead:
-                with self._downloadStream(jobStoreFileID, self.statsFiles) as fd:
-                    callback(fd)
-                # Mark this entity as read by appending the suffix
-                self.statsFileIDs.insert_entity(entity={'RowKey': jobStoreFileID + suffix})
-                self.statsFileIDs.delete_entity(row_key=jobStoreFileID)
-                numStatsFiles += 1
-            elif readAll:
-                # Strip the suffix to get the original ID
-                jobStoreFileID = jobStoreFileID[:-len(suffix)]
-                with self._downloadStream(jobStoreFileID, self.statsFiles) as fd:
-                    callback(fd)
-                numStatsFiles += 1
+        for attempt in retry_azure():
+            with attempt:
+                for entity in self.statsFileIDs.query_entities():
+                    jobStoreFileID = entity.RowKey
+                    hasBeenRead = len(jobStoreFileID) > self.jobIDLength
+                    if not hasBeenRead:
+                        with self._downloadStream(jobStoreFileID, self.statsFiles) as fd:
+                            callback(fd)
+                        # Mark this entity as read by appending the suffix
+                        self.statsFileIDs.insert_entity(entity={'RowKey': jobStoreFileID + suffix})
+                        self.statsFileIDs.delete_entity(row_key=jobStoreFileID)
+                        numStatsFiles += 1
+                    elif readAll:
+                        # Strip the suffix to get the original ID
+                        jobStoreFileID = jobStoreFileID[:-len(suffix)]
+                        with self._downloadStream(jobStoreFileID, self.statsFiles) as fd:
+                            callback(fd)
+                        numStatsFiles += 1
         return numStatsFiles
 
     _azureTimeFormat = "%Y-%m-%dT%H:%M:%SZ"
@@ -781,7 +796,7 @@ class AzureJob(JobGraph):
         """
         assert chunkSize <= maxAzureTablePropertySize
         item = {}
-        serializedAndEncodedJob = bz2.compress(cPickle.dumps(self))
+        serializedAndEncodedJob = bz2.compress(cPickle.dumps(self, protocol=cPickle.HIGHEST_PROTOCOL))
         jobChunks = [serializedAndEncodedJob[i:i + chunkSize]
                      for i in range(0, len(serializedAndEncodedJob), chunkSize)]
         for attributeOrder, chunk in enumerate(jobChunks):
@@ -795,7 +810,7 @@ def defaultRetryPredicate(exception):
     True
     >>> defaultRetryPredicate(socket.gaierror())
     True
-    >>> defaultRetryPredicate(httplib.HTTPException())
+    >>> defaultRetryPredicate(HTTPException())
     True
     >>> defaultRetryPredicate(requests.ConnectionError())
     True
@@ -812,8 +827,9 @@ def defaultRetryPredicate(exception):
     """
     return (isinstance(exception, (socket.error,
                                    socket.gaierror,
-                                   httplib.HTTPException,
-                                   requests.ConnectionError))
+                                   HTTPException,
+                                   requests.ConnectionError,
+                                   requests.Timeout))
             or isinstance(exception, AzureException) and
             any(message in str(exception).lower() for message in (
                 "could not be completed within the specified time",

@@ -3,12 +3,14 @@ from contextlib import contextmanager
 import hashlib
 import os
 import uuid
-from StringIO import StringIO
 from bd2k.util.threading import ExceptionalThread
 import boto
 import logging
-import cPickle
 import time
+
+# Python 3 compatibility imports
+from six.moves import cPickle, StringIO
+
 from toil.jobStores.abstractJobStore import (AbstractJobStore, NoSuchJobException,
                                              NoSuchFileException,
                                              ConcurrentFileModificationException)
@@ -116,7 +118,7 @@ class GoogleJobStore(AbstractJobStore):
                        command=jobNode.command, remainingRetryCount=self._defaultTryCount(),
                        logJobStoreFileID=None, predecessorNumber=jobNode.predecessorNumber,
                        **jobNode._requirements)
-        self._writeString(jobStoreID, cPickle.dumps(job))
+        self._writeString(jobStoreID, cPickle.dumps(job, protocol=cPickle.HIGHEST_PROTOCOL))
         return job
 
     def exists(self, jobStoreID):
@@ -146,7 +148,7 @@ class GoogleJobStore(AbstractJobStore):
         return cPickle.loads(jobString)
 
     def update(self, job):
-        self._writeString(job.jobStoreID, cPickle.dumps(job), update=True)
+        self._writeString(job.jobStoreID, cPickle.dumps(job, protocol=cPickle.HIGHEST_PROTOCOL), update=True)
 
     def delete(self, jobStoreID):
         # jobs will always be encrypted when avaliable
@@ -245,6 +247,12 @@ class GoogleJobStore(AbstractJobStore):
         projectID = url.host
         bucketAndKey = url.path
         return projectID, 'gs://'+bucketAndKey
+
+    @classmethod
+    def getSize(cls, url):
+        projectID, uri = GoogleJobStore._getResources(url)
+        uri = boto.storage_uri(uri, GOOGLE_STORAGE)
+        return uri.get_key().size
 
     @classmethod
     def _readFromUrl(cls, url, writable):

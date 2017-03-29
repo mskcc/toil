@@ -34,11 +34,14 @@ from contextlib import contextmanager
 from fcntl import flock, LOCK_EX, LOCK_UN
 from functools import partial
 from hashlib import sha1
-from Queue import Queue, Empty
 from threading import Thread, Semaphore, Event
 
+# Python 3 compatibility imports
+from six.moves.queue import Empty, Queue
+from six.moves import xrange
+
 from bd2k.util.humanize import bytes2human
-from toil.common import cacheDirName, getDirSizeRecursively
+from toil.common import cacheDirName, getDirSizeRecursively, getFileSystemSize
 from toil.lib.bioio import makePublicDir
 from toil.resource import ModuleDescriptor
 
@@ -132,8 +135,8 @@ class FileStore(object):
         the job.
 
         :return: The absolute path to a new local temporary directory. This directory will exist
-        for the duration of the job only, and is guaranteed to be deleted once the job terminates,
-        removing all files it contains recursively.
+                 for the duration of the job only, and is guaranteed to be deleted once the job
+                 terminates, removing all files it contains recursively.
         :rtype: str
         """
         return os.path.abspath(tempfile.mkdtemp(prefix="t", dir=self.localTempDir))
@@ -142,8 +145,8 @@ class FileStore(object):
         """
         Get a new local temporary file that will persist for the duration of the job.
 
-        :return: The absolute path to a local temporary file. This file will exist for the duration
-        of the job only, and is guaranteed to be deleted once the job terminates.
+        :return: The absolute path to a local temporary file. This file will exist for the
+                 duration of the job only, and is guaranteed to be deleted once the job terminates.
         :rtype: str
         """
         handle, tmpFile = tempfile.mkstemp(prefix="tmp", suffix=".tmp", dir=self.localTempDir)
@@ -171,11 +174,11 @@ class FileStore(object):
         Takes a file (as a path) and uploads it to the job store.
 
         :param string localFileName: The path to the local file to upload.
-        :param Boolean cleanup: if True then the copy of the global file will be deleted once the
+        :param bool cleanup: if True then the copy of the global file will be deleted once the
                job and all its successors have completed running.  If not the global file must be
                deleted manually.
         :return: an ID that can be used to retrieve the file.
-        :rtype: FileID
+        :rtype: toil.fileStore.FileID
         """
         raise NotImplementedError()
 
@@ -184,7 +187,7 @@ class FileStore(object):
         Similar to writeGlobalFile, but allows the writing of a stream to the job store.
         The yielded file handle does not need to and should not be closed explicitly.
 
-        :param Boolean cleanup: is as in :func:`toil.fileStore.FileStore.writeGlobalFile`.
+        :param bool cleanup: is as in :func:`toil.fileStore.FileStore.writeGlobalFile`.
         :return: A context manager yielding a tuple of
                   1) a file handle which can be written to and
                   2) the ID of the resulting file in the job store.
@@ -200,11 +203,11 @@ class FileStore(object):
         If a user path is specified, it is used as the destination. If a user path isn't
         specified, the file is stored in the local temp directory with an encoded name.
 
-        :param FileID fileStoreID: job store id for the file
+        :param toil.fileStore.FileID fileStoreID: job store id for the file
         :param string userPath: a path to the name of file to which the global file will be copied
                or hard-linked (see below).
-        :param boolean cache: Described in :func:`~filestore.Filestore.readGlobalFile`
-        :param boolean mutable: Described in :func:`~filestore.Filestore.readGlobalFile`
+        :param bool cache: Described in :func:`~toil.fileStore.FileStore.readGlobalFile`
+        :param bool mutable: Described in :func:`~toil.fileStore.FileStore.readGlobalFile`
         :return: An absolute path to a local, temporary copy of the file keyed by fileStoreID.
         :rtype: str
         """
@@ -245,7 +248,7 @@ class FileStore(object):
         return self.jobStore.importFile(srcUrl, sharedFileName=sharedFileName)
 
     def exportFile(self, jobStoreFileID, dstUrl):
-        self.jobStore.exportFile(jobStoreFileID, dstUrl)
+        raise NotImplementedError()
 
     # A utility method for accessing filenames
     def _resolveAbsoluteLocalPath(self, filePath):
@@ -472,6 +475,12 @@ class CachingFileStore(FileStore):
         # where the jobs don't exist.
         with self._CacheState.open(self) as cacheInfo:
             self.findAndHandleDeadJobs(cacheInfo)
+            # While we have a lock on the cache file, run a naive check to see if jobs on this node
+            # have greatly gone over their requested limits.
+            if cacheInfo.sigmaJob < 0:
+                logger.warning('Detecting that one or more jobs on this node have used more '
+                               'resources than requested.  Turn on debug logs to see more'
+                               'information on cache usage.')
         # Get the requirements for the job and clean the cache if necessary. cleanCache will
         # ensure that the requirements for this job are stored in the state file.
         jobReqs = job.disk
@@ -491,7 +500,7 @@ class CachingFileStore(FileStore):
                                            disk=diskUsed,
                                            humanRequestedDisk=bytes2human(jobReqs),
                                            requestedDisk=jobReqs))
-            self.logToMaster(logString, level=logging.INFO)
+            self.logToMaster(logString, level=logging.DEBUG)
             if diskUsed > jobReqs:
                 self.logToMaster("Job used more disk than requested. Please reconsider modifying "
                                  "the user script to avoid the chance  of failure due to "
@@ -589,11 +598,11 @@ class CachingFileStore(FileStore):
         The cache parameter will be used only if the file isn't already in the cache, and
         provided user path (if specified) is in the scope of local temp dir.
 
-        :param boolean cache: If True, a copy of the file will be saved into a cache that can be
+        :param bool cache: If True, a copy of the file will be saved into a cache that can be
                used by other workers. caching supports multiple concurrent workers requesting the
                same file by allowing only one to download the file while the others wait for it to
                complete.
-        :param boolean mutable: If True, the file path returned points to a file that is
+        :param bool mutable: If True, the file path returned points to a file that is
                modifiable by the user. Using False is recommended as it saves disk by making
                multiple workers share a file via hard links. The default is False unless backwards
                compatibility was requested.
@@ -628,7 +637,7 @@ class CachingFileStore(FileStore):
         # userPath. Cache operations can only occur on local files.
         with self.cacheLock() as lockFileHandle:
             if fileIsLocal and self._fileIsCached(fileStoreID):
-                logger.info('CACHE: Cache hit on file with ID \'%s\'.' % fileStoreID)
+                logger.debug('CACHE: Cache hit on file with ID \'%s\'.' % fileStoreID)
                 assert not os.path.exists(localFilePath)
                 if mutable:
                     shutil.copyfile(cachedFileName, localFilePath)
@@ -712,6 +721,13 @@ class CachingFileStore(FileStore):
                                                               0.0, False)
         return localFilePath
 
+    def exportFile(self, jobStoreFileID, dstUrl):
+        while jobStoreFileID in self._pendingFileWrites:
+            # The file is still being writting to the job store - wait for this process to finish prior to
+            # exporting it
+            time.sleep(1)
+        self.jobStore.exportFile(jobStoreFileID, dstUrl)
+
     def readGlobalFileStream(self, fileStoreID):
         if fileStoreID in self.filesToDelete:
             raise RuntimeError(
@@ -719,10 +735,10 @@ class CachingFileStore(FileStore):
 
         # If fileStoreID is in the cache provide a handle from the local cache
         if self._fileIsCached(fileStoreID):
-            logger.info('CACHE: Cache hit on file with ID \'%s\'.' % fileStoreID)
+            logger.debug('CACHE: Cache hit on file with ID \'%s\'.' % fileStoreID)
             return open(self.encodedFileID(fileStoreID), 'r')
         else:
-            logger.info('CACHE: Cache miss on file with ID \'%s\'.' % fileStoreID)
+            logger.debug('CACHE: Cache miss on file with ID \'%s\'.' % fileStoreID)
             return self.jobStore.readFileStream(fileStoreID)
 
     def deleteLocalFile(self, fileStoreID):
@@ -797,9 +813,9 @@ class CachingFileStore(FileStore):
                         os.remove(cachedFile)
                         cacheInfo.cached -= fileSize
                 self.logToMaster('Successfully deleted cached copy of file with ID '
-                                 '\'%s\'.' % fileStoreID)
+                                 '\'%s\'.' % fileStoreID, level=logging.DEBUG)
             self.logToMaster('Successfully deleted local copies of file with ID '
-                             '\'%s\'.' % fileStoreID)
+                             '\'%s\'.' % fileStoreID, level=logging.DEBUG)
 
     def deleteGlobalFile(self, fileStoreID):
         jobStateIsPopulated = False
@@ -823,7 +839,7 @@ class CachingFileStore(FileStore):
         # Add the file to the list of files to be deleted once the run method completes.
         self.filesToDelete.add(fileStoreID)
         self.logToMaster('Added file with ID \'%s\' to the list of files to be' % fileStoreID +
-                         ' globally deleted.')
+                         ' globally deleted.', level=logging.DEBUG)
 
     # Cache related methods
     @contextmanager
@@ -855,7 +871,7 @@ class CachingFileStore(FileStore):
             # will be renamed into the cache for this node.
             personalCacheDir = ''.join([os.path.dirname(self.localCacheDir), '/.ctmp-',
                                         str(uuid.uuid4())])
-            os.mkdir(personalCacheDir, 0755)
+            os.mkdir(personalCacheDir, 0o755)
             self._createCacheLockFile(personalCacheDir)
             try:
                 os.rename(personalCacheDir, self.localCacheDir)
@@ -898,8 +914,7 @@ class CachingFileStore(FileStore):
         # node.
         self.setNlinkThreshold()
         # Get the free space on the device
-        diskStats = os.statvfs(tempCacheDir)
-        freeSpace = diskStats.f_frsize * diskStats.f_bavail
+        freeSpace, _ = getFileSystemSize(tempCacheDir)
         # Create the cache lock file.
         open(os.path.join(tempCacheDir, os.path.basename(self.cacheLockFile)), 'w').close()
         # Setup the cache state file
@@ -962,7 +977,7 @@ class CachingFileStore(FileStore):
         :param str localFilePath: Path to the Source file
         :param jobStoreFileID: jobStoreID for the file
         :param str callingFunc: Who called this function, 'write' or 'read'
-        :param boolean mutable: See modifiable in readGlobalFile
+        :param bool mutable: See modifiable in readGlobalFile
         """
         assert callingFunc in ('read', 'write')
         # Set up the modifiable variable if it wasn't provided by the user in the function call.
@@ -1029,11 +1044,11 @@ class CachingFileStore(FileStore):
                     self.returnFileSize(jobStoreFileID, localFilePath, lockFileHandle,
                                         fileAlreadyCached=False)
                 if callingFunc == 'read':
-                    logger.info('CACHE: Read file with ID \'%s\' from the cache.' %
-                                jobStoreFileID)
+                    logger.debug('CACHE: Read file with ID \'%s\' from the cache.' %
+                                 jobStoreFileID)
                 else:
-                    logger.info('CACHE: Added file with ID \'%s\' to the cache.' %
-                                jobStoreFileID)
+                    logger.debug('CACHE: Added file with ID \'%s\' to the cache.' %
+                                 jobStoreFileID)
 
     def returnFileSize(self, fileStoreID, cachedFileSource, lockFileHandle,
                        fileAlreadyCached=False):
@@ -1121,24 +1136,28 @@ class CachingFileStore(FileStore):
             # Sort in descending order of mtime so the first items to be popped from the list
             # are the least recently created.
             deletableCacheFiles = sorted(deletableCacheFiles, key=lambda x: (-x[1], -x[2]))
-            logger.debug('CACHE: Need %s bytes for new job. Have %s' %
-                         (newJobReqs, cacheInfo.cached + cacheInfo.sigmaJob - newJobReqs))
+            logger.debug('CACHE: Need %s bytes for new job. Detecting an estimated %s (out of a '
+                         'total %s) bytes available for running the new job. The size of the cache '
+                         'is %s bytes.', newJobReqs,
+                         (cacheInfo.total - (cacheInfo.cached + cacheInfo.sigmaJob - newJobReqs)),
+                         cacheInfo.total, cacheInfo.cached)
             logger.debug('CACHE: Evicting files to make room for the new job.')
 
             # Now do the actual file removal
+            totalEvicted = 0
             while not cacheInfo.isBalanced() and len(deletableCacheFiles) > 0:
                 cachedFile, fileCreateTime, cachedFileSize = deletableCacheFiles.pop()
                 os.remove(cachedFile)
                 cacheInfo.cached -= cachedFileSize if self.nlinkThreshold != 2 else 0
+                totalEvicted += cachedFileSize
                 assert cacheInfo.cached >= 0
-                # self.logToMaster('CACHE: Evicted  file with ID \'%s\' (%s bytes)' %
-                #                  (self.decodedFileID(cachedFile), cachedFileSize))
                 logger.debug('CACHE: Evicted  file with ID \'%s\' (%s bytes)' %
                              (self.decodedFileID(cachedFile), cachedFileSize))
+            logger.debug('CACHE: Evicted a total of %s bytes. Available space is now %s bytes.',
+                         totalEvicted,
+                         (cacheInfo.total - (cacheInfo.cached + cacheInfo.sigmaJob - newJobReqs)))
             if not cacheInfo.isBalanced():
                 raise CacheUnbalancedError()
-            logger.debug('CACHE: After Evictions, ended up with %s.' %
-                         (cacheInfo.cached + cacheInfo.sigmaJob))
 
     def removeSingleCachedFile(self, fileStoreID):
         """
@@ -1382,7 +1401,7 @@ class CachingFileStore(FileStore):
             with open(self.harbingerFileName + '.tmp', 'w') as harbingerFile:
                 harbingerFile.write(str(os.getpid()))
             # Make this File read only to prevent overwrites
-            os.chmod(self.harbingerFileName + '.tmp', 0444)
+            os.chmod(self.harbingerFileName + '.tmp', 0o444)
             os.rename(self.harbingerFileName + '.tmp', self.harbingerFileName)
 
         def waitOnDownload(self, lockFileHandle):
@@ -1589,6 +1608,10 @@ class NonCachingFileStore(FileStore):
         self.localTempDir = makePublicDir(os.path.join(self.localTempDir, str(uuid.uuid4())))
         self.findAndHandleDeadJobs(self.workFlowDir)
         self.jobStateFile = self._createJobStateFile()
+        freeSpace, diskSize = getFileSystemSize(self.localTempDir)
+        if freeSpace <= 0.1 * diskSize:
+            logger.warning('Starting job %s with less than 10%% of disk space remaining.',
+                           self.jobName)
         try:
             os.chdir(self.localTempDir)
             yield
@@ -1603,7 +1626,7 @@ class NonCachingFileStore(FileStore):
                                            disk=diskUsed,
                                            humanRequestedDisk=bytes2human(jobReqs),
                                            requestedDisk=jobReqs))
-            self.logToMaster(logString, level=logging.INFO)
+            self.logToMaster(logString, level=logging.DEBUG)
             if diskUsed > jobReqs:
                 self.logToMaster("Job used more disk than requested. Cconsider modifying the user "
                                  "script to avoid the chance of failure due to incorrectly "
@@ -1640,6 +1663,9 @@ class NonCachingFileStore(FileStore):
     def readGlobalFileStream(self, fileStoreID):
         with self.jobStore.readFileStream(fileStoreID) as f:
             yield f
+
+    def exportFile(self, jobStoreFileID, dstUrl):
+        self.jobStore.exportFile(jobStoreFileID, dstUrl)
 
     def deleteLocalFile(self, fileStoreID):
         try:
@@ -1757,7 +1783,14 @@ class NonCachingFileStore(FileStore):
                 if filename == '.jobState':
                     jobStateFiles.append(os.path.join(root, filename))
         for filename in jobStateFiles:
-            yield NonCachingFileStore._readJobState(filename)
+            try:
+                yield NonCachingFileStore._readJobState(filename)
+            except IOError as e:
+                if e.errno == 2:
+                    # job finished & deleted its jobState file since the jobState files were discovered
+                    continue
+                else:
+                    raise
 
     @staticmethod
     def _readJobState(jobStateFileName):
@@ -1856,7 +1889,10 @@ class CacheUnbalancedError(CacheError):
     """
     Raised if file store can't free enough space for caching
     """
-    message = 'Unable unable to free enough space for caching'
+    message = 'Unable unable to free enough space for caching.  This error frequently arises due ' \
+              'to jobs using more disk than they have requested.  Turn on debug logging to see ' \
+              'more information leading up to this error through cache usage logs.'
+
     def __init__(self):
         super(CacheUnbalancedError, self).__init__(self.message)
 

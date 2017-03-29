@@ -14,7 +14,6 @@
 
 from __future__ import absolute_import, print_function
 
-import cPickle
 import collections
 import importlib
 import inspect
@@ -29,6 +28,10 @@ from abc import ABCMeta, abstractmethod
 from argparse import ArgumentParser
 from contextlib import contextmanager
 from io import BytesIO
+
+# Python 3 compatibility imports
+from six.moves import cPickle
+from six import iteritems, string_types
 
 from bd2k.util.exceptions import require
 from bd2k.util.expando import Expando
@@ -241,7 +244,6 @@ class JobNode(JobLikeObject):
                    unitName=job.unitName,
                    predecessorNumber=predecessorNumber)
 
-
 class Job(JobLikeObject):
     """
     Class represents a unit of work in toil.
@@ -250,7 +252,7 @@ class Job(JobLikeObject):
                  checkpoint=False):
         """
         This method must be called by any overriding constructor.
-        
+
         :param memory: the maximum number of bytes of memory the job will require to run.
         :param cores: the number of CPU cores required.
         :param disk: the amount of local disk space required by the job, expressed in bytes.
@@ -261,7 +263,7 @@ class Job(JobLikeObject):
             :func:`toil.job.Job.checkNewCheckpointsAreCutVertices`.
         :type cores: int or string convertable by bd2k.util.humanize.human2bytes to an int
         :type disk: int or string convertable by bd2k.util.humanize.human2bytes to an int
-        :type preemptable: boolean
+        :type preemptable: bool
         :type cache: int or string convertable by bd2k.util.humanize.human2bytes to an int
         :type memory: int or string convertable by bd2k.util.humanize.human2bytes to an int
         """
@@ -283,7 +285,7 @@ class Job(JobLikeObject):
         # Note that self.__module__ is not necessarily this module, i.e. job.py. It is the module
         # defining the class self is an instance of, which may be a subclass of Job that may be
         # defined in a different module.
-        self.userModule = ModuleDescriptor.forModule(self.__module__)
+        self.userModule = ModuleDescriptor.forModule(self.__module__).globalize()
         # Maps index paths into composite return values to lists of IDs of files containing
         # promised values for those return value items. An index path is a tuple of indices that
         # traverses a nested data structure of lists, dicts, tuples or any other type supporting
@@ -291,7 +293,7 @@ class Job(JobLikeObject):
         # entire return value.
         self._rvs = collections.defaultdict(list)
         self._promiseJobStore = None
-        self.fileStore = None
+        self._fileStore = None
 
     def run(self, fileStore):
         """
@@ -324,7 +326,7 @@ class Job(JobLikeObject):
 
         :param toil.job.Job childJob:
         :return: True if childJob is a child of the job, else False.
-        :rtype: Boolean
+        :rtype: bool
         """
         return childJob in self._children
 
@@ -484,7 +486,7 @@ class Job(JobLikeObject):
         Convenience function for constructor of :class:`toil.job.EncapsulatedJob`.
 
         :return: an encapsulated version of this job.
-        :rtype: toil.job.EncapsulatedJob.
+        :rtype: toil.job.EncapsulatedJob
         """
         return EncapsulatedJob(self)
 
@@ -644,14 +646,14 @@ class Job(JobLikeObject):
         # Check for each job for which checkpoint is true that it is a cut vertex or leaf
         for y in filter(lambda x : x.checkpoint, jobs):
             if y not in roots: # The roots are the prexisting jobs
-                if len(y._children) != 0 and len(y._followOns) != 0 and len(y._services) != 0:
+                if not Job._isLeafVertex(y):
                     raise JobGraphDeadlockException("New checkpoint job %s is not a leaf in the job graph" % y)
 
     def defer(self, function, *args, **kwargs):
         """
         Register a deferred function, i.e. a callable that will be invoked after the current
         attempt at running this job concludes. A job attempt is said to conclude when the job
-        function (or the :meth:`Job.run` method for class-based jobs) returns, raises an
+        function (or the :meth:`toil.job.Job.run` method for class-based jobs) returns, raises an
         exception or after the process running it terminates abnormally. A deferred function will
         be called on the node that attempted to run the job, even if a subsequent attempt is made
         on another node. A deferred function should be idempotent because it may be called
@@ -669,9 +671,9 @@ class Job(JobLikeObject):
 
         :param dict kwargs: The keyword arguments to the function
         """
-        require( self.fileStore is not None, 'A deferred function may only be registered with a '
+        require(self._fileStore is not None, 'A deferred function may only be registered with a '
                                              'job while that job is running.')
-        self.fileStore._registerDeferredFunction(DeferredFunction.create(function, *args, **kwargs))
+        self._fileStore._registerDeferredFunction(DeferredFunction.create(function, *args, **kwargs))
 
 
     ####################################################
@@ -759,12 +761,13 @@ class Job(JobLikeObject):
         def start(self, job):
             """
             Start the service.
-            
-            :param toil.job.Job job: The underlying job that is being run. Can be used to register
-            deferred functions, or to access the fileStore for creating temporary files.
 
-            :returns: An object describing how to access the service. The object must be pickleable \
-            and will be used by jobs to access the service (see :func:`toil.job.Job.addService`).
+            :param toil.job.Job job: The underlying job that is being run. Can be used to
+                                     register deferred functions, or to access the fileStore
+                                     for creating temporary files.
+
+            :returns: An object describing how to access the service. The object must be pickleable
+                      and will be used by jobs to access the service (see :func:`toil.job.Job.addService`).
             """
             pass
 
@@ -772,9 +775,10 @@ class Job(JobLikeObject):
         def stop(self, job):
             """
             Stops the service. Function can block until complete.
-            
+
             :param toil.job.Job job: The underlying job that is being run. Can be used to register
-            deferred functions, or to access the fileStore for creating temporary files.
+                                     deferred functions, or to access the fileStore for creating temporary
+                                     files.
             """
             pass
 
@@ -782,7 +786,7 @@ class Job(JobLikeObject):
             """
             Checks the service is still running.
 
-            :raise RuntimeError: If the service failed, this will cause the service job to be labeled failed.
+            :raise exceptions.RuntimeError: If the service failed, this will cause the service job to be labeled failed.
             :returns: True if the service is still running, else False. If False then the service job will be terminated,
                 and considered a success. Important point: if the service job exits due to a failure, it should raise a
                 RuntimeError, not return False!
@@ -820,6 +824,12 @@ class Job(JobLikeObject):
         if predecessorJob in self._directPredecessors:
             raise RuntimeError("The given job is already a predecessor of this job")
         self._directPredecessors.add(predecessorJob)
+
+    @staticmethod
+    def _isLeafVertex(job):
+        return len(job._children) == 0 \
+               and len(job._followOns) == 0 \
+               and len(job._services) == 0
 
     @classmethod
     def _loadUserModule(cls, userModule):
@@ -894,7 +904,7 @@ class Job(JobLikeObject):
         """
         Sets the values for promises using the return values from this job's run() function.
         """
-        for path, promiseFileStoreIDs in self._rvs.iteritems():
+        for path, promiseFileStoreIDs in iteritems(self._rvs):
             if not path:
                 # Note that its possible for returnValues to be a promise, not an actual return
                 # value. This is the case if the job returns a promise from another job. In
@@ -1103,9 +1113,9 @@ class Job(JobLikeObject):
             serviceJob.service._childServices = None
             assert serviceJob._services == []
             #service = serviceJob.service
-            
+
             # Pickle the job
-            serviceJob.pickledService = cPickle.dumps(serviceJob.service)
+            serviceJob.pickledService = cPickle.dumps(serviceJob.service, protocol=cPickle.HIGHEST_PROTOCOL)
             serviceJob.service = None
 
             # Serialise the service job and job wrapper
@@ -1176,6 +1186,13 @@ class Job(JobLikeObject):
 
         :param toil.jobStores.abstractJobStore.AbstractJobStore jobStore:
         """
+
+        # Check if the workflow root is a checkpoint but not a leaf vertex.
+        # All other job vertices in the graph are checked by checkNewCheckpointsAreLeafVertices
+        if self.checkpoint and not Job._isLeafVertex(self):
+            raise JobGraphDeadlockException(
+                'New checkpoint job %s is not a leaf in the job graph' % self)
+
         # Create first jobGraph
         jobGraph = self._createEmptyJobGraphForJob(jobStore=jobStore, predecessorNumber=0)
         # Write the graph of jobs to disk
@@ -1263,7 +1280,9 @@ class Job(JobLikeObject):
                filestore
         :return:
         """
-        # Run the job
+        # Make fileStore available as an attribute during run() ...
+        self._fileStore = fileStore
+        # ... but also pass it to run() as an argument for backwards compatibility.
         returnValues = self._run(jobGraph, fileStore)
         # Serialize the new jobs defined by the run method to the jobStore
         self._serialiseExistingJob(jobGraph, jobStore, returnValues)
@@ -1327,7 +1346,7 @@ class FunctionWrappingJob(Job):
                     # ... and finally fall back to a default value.
                     value = default
             # Optionally, convert strings with metric or binary prefixes.
-            if dehumanize and isinstance(value, basestring):
+            if dehumanize and isinstance(value, string_types):
                 value = human2bytes(value)
             return value
 
@@ -1371,12 +1390,16 @@ class JobFunctionWrappingJob(FunctionWrappingJob):
     :class:`job.Job` class provides.
 
     To enable the job function to get access to the :class:`toil.fileStore.FileStore` \
-    instance (see :func:`toil.job.Job.Run`), it is made a variable of the wrapping job \
+    instance (see :func:`toil.job.Job.run`), it is made a variable of the wrapping job \
     called fileStore.
     """
+
+    @property
+    def fileStore(self):
+        return self._fileStore
+
     def run(self, fileStore):
         userFunction = self._getUserFunction()
-        self.fileStore = fileStore
         rValue = userFunction(*((self,) + tuple(self._args)), **self._kwargs)
         return rValue
 
@@ -1520,11 +1543,11 @@ class ServiceJob(Job):
         # the job is run. It is used to access the start and terminate flags.
         self.jobGraph = None
 
-    def run(self, fileStore):
-        
-        # we need access to the filestore from underneath the service job
-        self.fileStore = fileStore
+    @property
+    def fileStore(self):
+        return self._fileStore
 
+    def run(self, fileStore):
         # Unpickle the service
         logger.debug('Loading service module %s.', self.serviceModule)
         userModule = self._loadUserModule(self.serviceModule)

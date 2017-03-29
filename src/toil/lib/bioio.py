@@ -27,6 +27,11 @@ import shutil
 from argparse import ArgumentParser
 from optparse import OptionContainer, OptionGroup
 import subprocess
+
+# Python 3 compatibility imports
+from six.moves import xrange
+from six import string_types
+
 import xml.etree.cElementTree as ET
 from xml.dom import minidom  # For making stuff pretty
 
@@ -163,15 +168,17 @@ def system(command):
     :type command: str | sequence[string]
     """
     logger.debug('Running: %r', command)
-    subprocess.check_call(command, shell=isinstance(command,basestring), bufsize=-1)
+    subprocess.check_call(command, shell=isinstance(command, string_types), bufsize=-1)
 
 def getTotalCpuTimeAndMemoryUsage():
-    """Gives the total cpu time and memory usage of itself and its children.
+    """
+    Gives the total cpu time of itself and all its children, and the maximum RSS memory usage of
+    itself and its single largest child.
     """
     me = resource.getrusage(resource.RUSAGE_SELF)
     childs = resource.getrusage(resource.RUSAGE_CHILDREN)
-    totalCPUTime = me.ru_utime+me.ru_stime+childs.ru_utime+childs.ru_stime
-    totalMemoryUsage = me.ru_maxrss+ me.ru_maxrss
+    totalCPUTime = me.ru_utime + me.ru_stime + childs.ru_utime + childs.ru_stime
+    totalMemoryUsage = me.ru_maxrss + childs.ru_maxrss
     return totalCPUTime, totalMemoryUsage
 
 def getTotalCpuTime():
@@ -180,7 +187,7 @@ def getTotalCpuTime():
     return getTotalCpuTimeAndMemoryUsage()[0]
 
 def getTotalMemoryUsage():
-    """Gets the amount of memory used by the process and its children.
+    """Gets the amount of memory used by the process and its largest child.
     """
     return getTotalCpuTimeAndMemoryUsage()[1]
 
@@ -287,7 +294,7 @@ def makePublicDir(dirName):
     """
     if not os.path.exists(dirName):
         os.mkdir(dirName)
-        os.chmod(dirName, 0777)
+        os.chmod(dirName, 0o777)
     return dirName
 
 def getTempFile(suffix="", rootDir=None):
@@ -300,5 +307,5 @@ def getTempFile(suffix="", rootDir=None):
     else:
         tmpFile = os.path.join(rootDir, "tmp_" + getRandomAlphaNumericString() + suffix)
         open(tmpFile, 'w').close()
-        os.chmod(tmpFile, 0777) #Ensure everyone has access to the file.
+        os.chmod(tmpFile, 0o777) #Ensure everyone has access to the file.
         return tmpFile

@@ -21,12 +21,16 @@ import pickle
 import pwd
 import socket
 import time
-from Queue import Queue, Empty
 from collections import defaultdict
 from operator import attrgetter
 from struct import unpack
 
 import itertools
+
+# Python 3 compatibility imports
+from six.moves.queue import Empty, Queue
+from six import iteritems, itervalues
+
 import mesos.interface
 import mesos.native
 from bd2k.util import strict_bool
@@ -101,6 +105,9 @@ class MesosBatchSystem(BatchSystemSupport,
         # Dict of launched jobIDs to TaskData objects
         self.runningJobMap = {}
 
+        # Mesos has no easy way of getting a task's resources so we track them here
+        self.taskResources = {}
+
         # Queue of jobs whose status has been updated, according to Mesos
         self.updatedJobsQueue = Queue()
 
@@ -146,6 +153,7 @@ class MesosBatchSystem(BatchSystemSupport,
         self.checkResourceRequest(jobNode.memory, jobNode.cores, jobNode.disk)
         jobID = next(self.unusedJobID)
         job = ToilJob(jobID=jobID,
+                      name=str(jobNode),
                       resources=ResourceRequirement(**jobNode._requirements),
                       command=jobNode.command,
                       userScript=self.userScript,
@@ -154,6 +162,7 @@ class MesosBatchSystem(BatchSystemSupport,
         jobType = job.resources
         log.debug("Queueing the job command: %s with job id: %s ...", jobNode.command, str(jobID))
         self.jobQueues[jobType].append(job)
+        self.taskResources[jobID] = job.resources
         log.debug("... queued")
         return jobID
 
@@ -312,7 +321,7 @@ class MesosBatchSystem(BatchSystemSupport,
                 assert preemptable is None, "Attribute 'preemptable' occurs more than once."
                 preemptable = strict_bool(attribute.text.value)
         if preemptable is None:
-            log.warn('Slave not marked as either preemptable or not. Assuming non-preemptable.')
+            log.debug('Slave not marked as either preemptable or not. Assuming non-preemptable.')
             preemptable = False
         for resource in offer.resources:
             if resource.name == "cpus":
@@ -337,9 +346,14 @@ class MesosBatchSystem(BatchSystemSupport,
                     jobType.remove(job)
 
     def _updateStateToRunning(self, offer, task):
+        resourceKey = int(task.task_id.value)
+        resources = self.taskResources[resourceKey]
         self.runningJobMap[int(task.task_id.value)] = TaskData(startTime=time.time(),
-                                                               slaveID=offer.slave_id,
-                                                               executorID=task.executor.executor_id)
+                                                               slaveID=offer.slave_id.value,
+                                                               executorID=task.executor.executor_id.value,
+                                                               cores=resources.cores,
+                                                               memory=resources.memory)
+        del self.taskResources[resourceKey]
         self._deleteByJobID(int(task.task_id.value))
 
     def resourceOffers(self, driver, offers):
@@ -432,7 +446,7 @@ class MesosBatchSystem(BatchSystemSupport,
             preemptable = False
             for attribute in offer.attributes:
                 if attribute.name == 'preemptable':
-                    preemptable = bool(attribute.scalar.value)
+                    preemptable = strict_bool(attribute.text.value)
             if preemptable:
                 try:
                     self.nonPreemptibleNodes.remove(offer.slave_id.value)
@@ -448,8 +462,7 @@ class MesosBatchSystem(BatchSystemSupport,
         task = mesos_pb2.TaskInfo()
         task.task_id.value = str(job.jobID)
         task.slave_id.value = offer.slave_id.value
-        # FIXME: what bout
-        task.name = str(job)
+        task.name = job.name
         task.data = pickle.dumps(job)
         task.executor.MergeFrom(self.executor)
 
@@ -533,10 +546,15 @@ class MesosBatchSystem(BatchSystemSupport,
         nodeAddress = message.pop('address')
         executor = self._registerNode(nodeAddress, slaveId.value)
         # Handle optional message fields
-        for k, v in message.iteritems():
+        for k, v in iteritems(message):
             if k == 'nodeInfo':
                 assert isinstance(v, dict)
-                executor.nodeInfo = NodeInfo(**v)
+                resources = [taskData for taskData in itervalues(self.runningJobMap)
+                             if taskData.executorID == executorId.value]
+                requestedCores = sum(taskData.cores for taskData in resources)
+                requestedMemory = sum(taskData.memory for taskData in resources)
+                executor.nodeInfo = NodeInfo(requestedCores=requestedCores, requestedMemory=requestedMemory, **v)
+                self.executors[nodeAddress] = executor
             else:
                 raise RuntimeError("Unknown message field '%s'." % k)
 
@@ -554,7 +572,7 @@ class MesosBatchSystem(BatchSystemSupport,
 
     def getNodes(self, preemptable=None):
         return {nodeAddress: executor.nodeInfo
-                for nodeAddress, executor in self.executors.iteritems()
+                for nodeAddress, executor in iteritems(self.executors)
                 if time.time() - executor.lastSeen < 600
                 and (preemptable is None
                      or preemptable == (executor.slaveId not in self.nonPreemptibleNodes))}

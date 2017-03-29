@@ -17,13 +17,21 @@ from __future__ import absolute_import
 
 import os
 import shutil
+import logging
+import time
 from abc import ABCMeta, abstractmethod
 from collections import namedtuple
+from Queue import Queue, Empty
 
 from bd2k.util.objects import abstractclassmethod
 
 from toil.common import Toil, cacheDirName
 from toil.fileStore import shutdownFileStore
+
+logger = logging.getLogger(__name__)
+
+# TODO: should this be an attribute?  Used in the worker and the batch system
+sleepSeconds = 1
 
 # A class containing the information required for worker cleanup on shutdown of the batch system.
 WorkerCleanupInfo = namedtuple('WorkerCleanupInfo', (
@@ -33,7 +41,6 @@ WorkerCleanupInfo = namedtuple('WorkerCleanupInfo', (
     'workflowID',
     # The value of the cleanWorkDir flag
     'cleanWorkDir'))
-
 
 class AbstractBatchSystem(object):
     """
@@ -48,7 +55,7 @@ class AbstractBatchSystem(object):
     def supportsHotDeployment(cls):
         """
         Whether this batch system supports hot deployment of the user script itself. If it does,
-        the :meth:`setUserScript` can be invoked to set the resource object representing the user
+        the :meth:`.setUserScript` can be invoked to set the resource object representing the user
         script.
 
         Note to implementors: If your implementation returns True here, it should also override
@@ -96,7 +103,7 @@ class AbstractBatchSystem(object):
 
         :param int disk: int giving the number of bytes of disk space the job needs to run
 
-        :param booleam preemptable: True if the job can be run on a preemptable node
+        :param bool preemptable: True if the job can be run on a preemptable node
 
         :return: a unique jobID that can be used to reference the newly issued job
         :rtype: int
@@ -311,18 +318,34 @@ class BatchSystemSupport(AbstractBatchSystem):
             and workflowDirContents in ([], [cacheDirName(info.workflowID)])):
             shutil.rmtree(workflowDir)
 
-
-class NodeInfo(namedtuple("_NodeInfo", "cores memory workers")):
+class NodeInfo(object):
     """
-    The cores attribute  is a floating point value between 0 (all cores idle) and 1 (all cores
+    The coresUsed attribute  is a floating point value between 0 (all cores idle) and 1 (all cores
     busy), reflecting the CPU load of the node.
 
-    The memory attribute is a floating point value between 0 (no memory used) and 1 (all memory
+    The memoryUsed attribute is a floating point value between 0 (no memory used) and 1 (all memory
     used), reflecting the memory pressure on the node.
+
+    The coresTotal and memoryTotal attributes are the node's resources, not just the used resources
+
+    The requestedCores and requestedMemory attributes are all the resources that Toil Jobs have reserved on the
+    node, regardless of whether the resources are actually being used by the Jobs.
 
     The workers attribute is an integer reflecting the number of workers currently active workers
     on the node.
     """
+    def __init__(self, coresUsed, memoryUsed, coresTotal, memoryTotal,
+                 requestedCores, requestedMemory, workers):
+        self.coresUsed = coresUsed
+        self.memoryUsed = memoryUsed
+
+        self.coresTotal = coresTotal
+        self.memoryTotal = memoryTotal
+
+        self.requestedCores = requestedCores
+        self.requestedMemory = requestedMemory
+
+        self.workers = workers
 
 
 class AbstractScalableBatchSystem(AbstractBatchSystem):
@@ -344,7 +367,6 @@ class AbstractScalableBatchSystem(AbstractBatchSystem):
         :rtype: dict[str,NodeInfo]
         """
         raise NotImplementedError()
-
 
 class InsufficientSystemResources(Exception):
     """

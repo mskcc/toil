@@ -27,8 +27,12 @@ from contextlib import closing
 from io import BytesIO
 from pydoc import locate
 from tempfile import mkdtemp
-from urllib2 import urlopen
+from urllib2 import HTTPError
 from zipfile import ZipFile, PyZipFile
+
+# Python 3 compatibility imports
+from bd2k.util.retry import retry
+from six.moves.urllib.request import urlopen
 
 from bd2k.util import strict_bool
 from bd2k.util.iterables import concat
@@ -231,8 +235,10 @@ class Resource(namedtuple('Resource', ('name', 'pathHash', 'url', 'contentHash')
 
         :type dstFile: io.BytesIO|io.FileIO
         """
-        with closing(urlopen(self.url)) as content:
-            buf = content.read()
+        for attempt in retry(predicate=lambda e: isinstance(e, HTTPError) and e.code == 400):
+            with attempt:
+                with closing(urlopen(self.url)) as content:
+                    buf = content.read()
         contentHash = hashlib.md5(buf)
         assert contentHash.hexdigest() == self.contentHash
         dstFile.write(buf)
@@ -366,10 +372,13 @@ class ModuleDescriptor(namedtuple('ModuleDescriptor', ('dirPath', 'name', 'fromV
         filePath[-1], extension = os.path.splitext(filePath[-1])
         require(extension in ('.py', '.pyc'),
                 'The name of a user script/module must end in .py or .pyc.')
+        log.debug("Module name is %s", name)
         if name == '__main__':
+            log.debug("Discovering real name of module")
             # User script/module was invoked as the main program
             if module.__package__:
                 # Invoked as a module via python -m foo.bar
+                log.debug("Script was invoked as a module")
                 name = [filePath.pop()]
                 for package in reversed(module.__package__.split('.')):
                     dirPathTail = filePath.pop()
@@ -388,7 +397,10 @@ class ModuleDescriptor(namedtuple('ModuleDescriptor', ('dirPath', 'name', 'fromV
                 dirPathTail = filePath.pop()
                 assert dirPathTail == package
             dirPath = os.path.sep.join(filePath)
-        assert os.path.isdir(dirPath)
+        log.debug("Module dir is %s", dirPath)
+        require(os.path.isdir(dirPath),
+                'Bad directory path %s for module %s. Note that hot-deployment does not support \
+                .egg-link files yet, or scripts located in the root directory.', dirPath, name)
         fromVirtualEnv = inVirtualEnv() and dirPath.startswith(sys.prefix)
         return cls(dirPath=dirPath, name=name, fromVirtualEnv=fromVirtualEnv)
 

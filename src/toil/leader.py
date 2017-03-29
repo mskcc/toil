@@ -17,14 +17,17 @@ The leader script (of the leader/worker pair) for running jobs.
 """
 from __future__ import absolute_import
 
-import cPickle
 import logging
 import gzip
 import os
 import time
 from collections import namedtuple
 
+# Python 3 compatibility imports
+from six.moves import cPickle
+
 from bd2k.util.expando import Expando
+from bd2k.util.humanize import bytes2human
 
 from toil import resolveEntryPoint
 from toil.jobStores.abstractJobStore import NoSuchJobException
@@ -32,6 +35,7 @@ from toil.provisioners.clusterScaler import ClusterScaler
 from toil.serviceManager import ServiceManager
 from toil.statsAndLogging import StatsAndLogging
 from toil.jobGraph import JobNode
+from toil.job import ServiceJobNode
 from toil.toilState import ToilState
 
 logger = logging.getLogger( __name__ )
@@ -137,8 +141,12 @@ class Leader:
         self.statsAndLogging = StatsAndLogging(self.jobStore, self.config)
 
         # Set used to monitor deadlocked jobs
-        self.potentialDeadlockedJobs = None
+        self.potentialDeadlockedJobs = set()
         self.potentialDeadlockTime = 0
+
+        # internal jobs we should not expose at top level debugging
+        self.debugJobNames = ("CWLJob", "CWLWorkflow", "CWLScatter", "CWLGather",
+                              "ResolveIndirect")
 
     def run(self):
         """
@@ -420,11 +428,12 @@ class Leader:
                                 "for job %s", jobID)
                 else:
                     if result == 0:
-                        logger.debug('Batch system is reporting that the job %s ended successfully',
-                                     updatedJob)
+                        cur_logger = (logger.debug if str(updatedJob.jobName).startswith(self.debugJobNames)
+                                      else logger.info)
+                        cur_logger('Job ended successfully: %s', updatedJob)
                     else:
-                        logger.warn('Batch system is reporting that the job %s failed with exit value %i',
-                                    updatedJob, result)
+                        logger.warn('Job failed with exit value %i: %s',
+                                    result, updatedJob)
                     self.processFinishedJob(jobID, result, wallTime=wallTime)
 
             else:
@@ -480,44 +489,50 @@ class Leader:
         """
         Checks if the system is deadlocked running service jobs.
         """
-        # If there are no updated jobs and at least some jobs issued
-        if len(self.toilState.updatedJobs) == 0 and self.getNumberOfJobsIssued() > 0:
+        totalRunningJobs = len(self.batchSystem.getRunningBatchJobIDs())
+        totalServicesIssued = self.serviceJobsIssued + self.preemptableServiceJobsIssued
+        # If there are no updated jobs and at least some jobs running
+        if totalServicesIssued >= totalRunningJobs and len(self.toilState.updatedJobs) == 0 and totalRunningJobs > 0:
+            serviceJobs = filter(lambda x : isinstance(x, ServiceJobNode), self.jobBatchSystemIDToIssuedJob.values())
+            runningServiceJobs = set(filter(lambda x : self.serviceManager.isRunning(x), serviceJobs))
+            assert len(runningServiceJobs) <= totalRunningJobs
 
-            # If all scheduled jobs are services
-            assert self.serviceJobsIssued + self.preemptableServiceJobsIssued <= self.getNumberOfJobsIssued()
-            if self.serviceJobsIssued + self.preemptableServiceJobsIssued == self.getNumberOfJobsIssued():
-
-                # Sanity check that all issued jobs are actually services
-                for jobNode in self.jobBatchSystemIDToIssuedJob.values():
-                    assert jobNode.jobStoreID in self.toilState.serviceJobStoreIDToPredecessorJob
-
-                # An active service job is one that is not in the process of terminating
-                activeServiceJobs = filter(lambda x : self.serviceManager.isActive(x), self.jobBatchSystemIDToIssuedJob.values())
-
-                # If all the service jobs are active then we have a potential deadlock
-                if len(activeServiceJobs) == len(self.jobBatchSystemIDToIssuedJob):
-                    # We wait self.config.deadlockWait seconds before declaring the system deadlocked
-                    if self.potentialDeadlockedJobs != activeServiceJobs:
-                        self.potentialDeadlockedJobs = activeServiceJobs
-                        self.potentialDeadlockTime = time.time()
-                    elif time.time() - self.potentialDeadlockTime >= self.config.deadlockWait:
-                        raise DeadlockException("The system is service deadlocked - all issued jobs %s are active services" % self.getNumberOfJobsIssued())
+            # If all the running jobs are active services then we have a potential deadlock
+            if len(runningServiceJobs) == totalRunningJobs:
+                # We wait self.config.deadlockWait seconds before declaring the system deadlocked
+                if self.potentialDeadlockedJobs != runningServiceJobs:
+                    self.potentialDeadlockedJobs = runningServiceJobs
+                    self.potentialDeadlockTime = time.time()
+                elif time.time() - self.potentialDeadlockTime >= self.config.deadlockWait:
+                    raise DeadlockException("The system is service deadlocked - all %d running jobs are active services" % totalRunningJobs)
+            else:
+                # We have observed non-service jobs running, so reset the potential deadlock
+                self.potentialDeadlockedJobs = set()
+                self.potentialDeadlockTime = 0
+        else:
+            # We have observed non-service jobs running, so reset the potential deadlock
+            self.potentialDeadlockedJobs = set()
+            self.potentialDeadlockTime = 0
 
 
     def issueJob(self, jobNode):
         """
         Add a job to the queue of jobs
         """
-        if jobNode.preemptable:
-            self.preemptableJobsIssued += 1
         jobNode.command = ' '.join((resolveEntryPoint('_toil_worker'),
                                     self.jobStoreLocator, jobNode.jobStoreID))
         jobBatchSystemID = self.batchSystem.issueBatchJob(jobNode)
         self.jobBatchSystemIDToIssuedJob[jobBatchSystemID] = jobNode
-        logger.debug("Issued job with job store ID: %s and job batch system ID: "
-                     "%s and cores: %.2f, disk: %.2f, and memory: %.2f",
-                     jobNode.jobStoreID, str(jobBatchSystemID), jobNode.cores,
-                     jobNode.disk, jobNode.memory)
+        if jobNode.preemptable:
+            # len(jobBatchSystemIDToIssuedJob) should always be greater than or equal to preemptableJobsIssued,
+            # so increment this value after the job is added to the issuedJob dict
+            self.preemptableJobsIssued += 1
+        cur_logger = (logger.debug if jobNode.jobName.startswith(self.debugJobNames)
+                      else logger.info)
+        cur_logger("Issued job %s with job batch system ID: "
+                   "%s and cores: %s, disk: %s, and memory: %s",
+                   jobNode, str(jobBatchSystemID), int(jobNode.cores),
+                   bytes2human(jobNode.disk), bytes2human(jobNode.memory))
 
     def issueJobs(self, jobs):
         """
@@ -586,11 +601,13 @@ class Leader:
         Removes a job from the system.
         """
         assert jobBatchSystemID in self.jobBatchSystemIDToIssuedJob
-        jobNode = self.jobBatchSystemIDToIssuedJob.pop(jobBatchSystemID)
+        jobNode = self.jobBatchSystemIDToIssuedJob[jobBatchSystemID]
         if jobNode.preemptable:
+            # len(jobBatchSystemIDToIssuedJob) should always be greater than or equal to preemptableJobsIssued,
+            # so decrement this value before removing the job from the issuedJob map
             assert self.preemptableJobsIssued > 0
             self.preemptableJobsIssued -= 1
-
+        del self.jobBatchSystemIDToIssuedJob[jobBatchSystemID]
         # If service job
         if jobNode.jobStoreID in self.toilState.serviceJobStoreIDToPredecessorJob:
             # Decrement the number of services

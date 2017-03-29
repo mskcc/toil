@@ -16,8 +16,11 @@ from __future__ import absolute_import
 
 import logging
 import time
-from Queue import Queue, Empty
+
 from threading import Thread, Event
+
+# Python 3 compatibility imports
+from six.moves.queue import Empty, Queue
 
 logger = logging.getLogger( __name__ )
 
@@ -122,10 +125,17 @@ class ServiceManager( object ):
             
     def isActive(self, serviceJobNode):
         """
-        Returns true is the service job has not been told to terminate.
+        Returns true if the service job has not been told to terminate.
         :rtype: boolean
         """
         return self.jobStore.fileExists(serviceJobNode.terminateJobStoreID)
+
+    def isRunning(self, serviceJobNode):
+        """
+        Returns true if the service job has started and is active
+        :rtype: boolean
+        """
+        return (not self.jobStore.fileExists(serviceJobNode.startJobStoreID)) and self.isActive(serviceJobNode)
 
     def check(self):
         """

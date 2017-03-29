@@ -15,9 +15,13 @@
 from __future__ import absolute_import
 import time
 from threading import Thread, Event
-from Queue import Queue, Empty
 import logging
 import random
+
+# Python 3 compatibility imports
+from six.moves.queue import Empty, Queue
+from six.moves import xrange
+from six import iteritems
 
 from bd2k.util.objects import InnerClass
 
@@ -219,7 +223,7 @@ class MockBatchSystemAndProvisioner(AbstractScalableBatchSystem, AbstractProvisi
 
     # Stub out all AbstractBatchSystem methods since they are never called
 
-    for name, value in AbstractBatchSystem.__dict__.iteritems():
+    for name, value in iteritems(AbstractBatchSystem.__dict__):
         if getattr(value, '__isabstractmethod__', False):
             exec 'def %s(): pass' % name
         # Without this, the class would end up with .name and .value attributes
@@ -285,8 +289,8 @@ class MockBatchSystemAndProvisioner(AbstractScalableBatchSystem, AbstractProvisi
         # AbstractScalableBatchSystem functionality
 
         def getNodes(self):
-            return {address: NodeInfo(cores=0,
-                                      memory=0,
+            return {address: NodeInfo(coresTotal=0, coresUsed=0,
+                                      memoryTotal=0, memoryUsed=0,
                                       workers=1 if w.busyEvent.is_set() else 0)
                     for address, w in enumerate(self.workers)}
 

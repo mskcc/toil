@@ -14,7 +14,6 @@
 
 from __future__ import absolute_import
 
-from StringIO import StringIO
 from contextlib import contextmanager, closing
 import logging
 from multiprocessing import cpu_count
@@ -22,11 +21,13 @@ from multiprocessing import cpu_count
 import os
 import re
 import uuid
-import cPickle
 import base64
 import hashlib
 import itertools
-import repr as reprlib
+
+# Python 3 compatibility imports
+from six.moves import xrange, cPickle, StringIO, reprlib
+from six import iteritems
 
 from bd2k.util import strict_bool
 from bd2k.util.exceptions import panic
@@ -426,6 +427,14 @@ class AWSJobStore(AbstractJobStore):
             super(AWSJobStore, self)._exportFile(otherCls, jobStoreFileID, url)
 
     @classmethod
+    def getSize(cls, url):
+        key = cls._getKeyForUrl(url, existing=True)
+        try:
+            return key.size
+        finally:
+            key.bucket.connection.close()
+
+    @classmethod
     def _readFromUrl(cls, url, writable):
         srcKey = cls._getKeyForUrl(url, existing=True)
         try:
@@ -696,12 +705,15 @@ class AWSJobStore(AbstractJobStore):
                 else:
                     if self.__getBucketRegion(bucket) != self.region:
                         raise BucketLocationConflictException(self.__getBucketRegion(bucket))
-                if versioning:
+                if versioning and not bucketExisted:
+                    # only call this method on bucket creation
                     bucket.configure_versioning(True)
                 else:
+                    # now test for versioning consistency
+                    # we should never see any of these errors since 'versioning' should always be true
                     bucket_versioning = self.__getBucketVersioning(bucket)
-                    if bucket_versioning is True:
-                        assert False, 'Cannot disable bucket versioning if it is already enabled'
+                    if bucket_versioning != versioning:
+                        assert False, 'Cannot modify versioning on existing bucket'
                     elif bucket_versioning is None:
                         assert False, 'Cannot use a bucket with versioning suspended'
                 if bucketExisted:
@@ -1129,12 +1141,15 @@ class AWSJobStore(AbstractJobStore):
                         dstKey.set_contents_from_string(self.content)
             elif self.version:
                 for attempt in retry_s3():
-                    srcKey = self.outer.filesBucket.get_key(self.fileID,
-                                                            validate=False)
+                    encrypted = True if self.outer.sseKeyPath else False
+                    if encrypted:
+                        srcKey = self.outer.filesBucket.get_key(self.fileID, headers=self._s3EncryptionHeaders())
+                    else:
+                        srcKey = self.outer.filesBucket.get_key(self.fileID)
                     srcKey.version_id = self.version
                     with attempt:
                         headers = {k.replace('amz-', 'amz-copy-source-', 1): v
-                                   for k, v in self._s3EncryptionHeaders().iteritems()}
+                                   for k, v in iteritems(self._s3EncryptionHeaders())}
                         self._copyKey(srcKey=srcKey,
                                       dstBucketName=dstKey.bucket.name,
                                       dstKeyName=dstKey.name,
@@ -1144,6 +1159,7 @@ class AWSJobStore(AbstractJobStore):
 
         def _copyKey(self, srcKey, dstBucketName, dstKeyName, headers=None):
             headers = headers or {}
+            assert srcKey.size is not None 
             if srcKey.size > self.outer.partSize:
                 return copyKeyMultipart(srcKey=srcKey,
                                         dstBucketName=dstBucketName,
@@ -1352,7 +1368,7 @@ class AWSJob(JobGraph, SDBHelper):
         :rtype: (str,dict)
         :return: a str for the item's name and a dictionary for the item's attributes
         """
-        return self.jobStoreID, self.binaryToAttributes(cPickle.dumps(self))
+        return self.jobStoreID, self.binaryToAttributes(cPickle.dumps(self, protocol=cPickle.HIGHEST_PROTOCOL))
 
 
 class BucketLocationConflictException(Exception):

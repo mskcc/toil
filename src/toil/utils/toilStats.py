@@ -16,7 +16,7 @@
 Reports statistical data about a given Toil workflow.
 """
 
-from __future__ import absolute_import
+from __future__ import absolute_import, print_function
 from functools import partial
 import logging
 import json
@@ -55,7 +55,7 @@ class ColumnWidths(object):
     def report(self):
         for c in self.categories:
             for f in self.fields:
-                print '%s %s %d' % (c, f, self.getWidth(c, f))
+                print('%s %s %d' % (c, f, self.getWidth(c, f)))
 
 def initializeOptions(parser):
     parser.add_argument("jobStore", type=str,
@@ -387,11 +387,10 @@ def reportPrettyData(root, worker, job, job_types, options):
     """
     out_str = "Batch System: %s\n" % root.batch_system
     out_str += ("Default Cores: %s  Default Memory: %s\n"
-                "Max Cores: %s  Max Threads: %s\n" % (
+                "Max Cores: %s\n" % (
         reportNumber(get(root, "default_cores"), options),
         reportMemory(get(root, "default_memory"), options, isBytes=True),
         reportNumber(get(root, "max_cores"), options),
-        reportNumber(get(root, "max_threads"), options),
         ))
     out_str += ("Total Clock: %s  Total Runtime: %s\n" % (
         reportTime(get(root, "total_clock"), options),
@@ -460,7 +459,7 @@ def buildElement(element, items, itemName):
 
     itemWaits=[]
     for index in range(0,len(itemTimes)):
-        itemWaits.append(itemClocks[index]-itemTimes[index])
+        itemWaits.append(itemTimes[index] - itemClocks[index])
 
     itemWaits.sort()
     itemTimes.sort()
@@ -588,7 +587,7 @@ def reportData(tree, options):
         fileHandle.write(out_str)
         fileHandle.close()
     # Now dump onto the screen
-    print out_str
+    print(out_str)
 
 def main():
     """ Reports stats on the workflow, use with --stats option to toil.

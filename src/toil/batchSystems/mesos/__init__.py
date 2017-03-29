@@ -20,7 +20,11 @@ TaskData = namedtuple('TaskData', (
     # Mesos' ID of the slave where task is being run
     'slaveID',
     # Mesos' ID of the executor running the task
-    'executorID'))
+    'executorID',
+    # Memory requirement of the task
+    'memory',
+    # CPU requirement of the task
+    'cores'))
 
 
 class ResourceRequirement( namedtuple('_ResourceRequirement', (
@@ -42,6 +46,8 @@ class ResourceRequirement( namedtuple('_ResourceRequirement', (
 ToilJob = namedtuple('ToilJob', (
     # A job ID specific to this batch system implementation
     'jobID',
+    # What string to display in the mesos UI
+    'name',
     # A ResourceRequirement tuple describing the resources needed by this job
     'resources',
     # The command to be run on the worker node

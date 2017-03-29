@@ -14,7 +14,6 @@
 
 from __future__ import absolute_import
 
-import cPickle
 import logging
 import os
 import re
@@ -23,6 +22,10 @@ import tempfile
 import time
 from argparse import ArgumentParser
 from threading import Thread
+
+# Python 3 compatibility imports
+from six.moves import cPickle
+from six import iteritems
 
 from bd2k.util.exceptions import require
 from bd2k.util.humanize import bytes2human
@@ -66,6 +69,7 @@ class Config(object):
 
         #Batch system options
         self.batchSystem = "singleMachine"
+        self.disableHotDeployment = False
         self.scale = 1
         self.mesosMasterAddress = 'localhost:5050'
         self.parasolCommand = "parasol"
@@ -84,7 +88,7 @@ class Config(object):
         self.maxPreemptableNodes = 0
         self.alphaPacking = 0.8
         self.betaInertia = 1.2
-        self.scaleInterval = 10
+        self.scaleInterval = 30
         self.preemptableCompensation = 0.0
         
         # Parameters to limit service jobs, so preventing deadlock scheduling scenarios
@@ -196,6 +200,7 @@ class Config(object):
 
         #Batch system options
         setOption("batchSystem")
+        setOption("disableHotDeployment")
         setOption("scale", float, fC(0.0))
         setOption("mesosMasterAddress")
         setOption("parasolCommand")
@@ -335,6 +340,10 @@ def _addOptions(addGroupFn, config):
     addOptionFn("--batchSystem", dest="batchSystem", default=None,
                       help=("The type of batch system to run the job(s) with, currently can be one "
                             "of singleMachine, parasol, gridEngine, lsf or mesos'. default=%s" % config.batchSystem))
+    addOptionFn("--disableHotDeployment", dest="disableHotDeployment", action='store_true', default=None,
+                help=("Should hot-deployment of the user script be deactivated? If True, the user "
+                      "script/package should be present at the same location on all workers. "
+                      "default=%s" % config.disableHotDeployment))
     addOptionFn("--scale", dest="scale", default=None,
                 help=("A scaling factor to change the value of all submitted tasks's submitted cores. "
                       "Used in singleMachine batch system. default=%s" % config.scale))
@@ -356,7 +365,7 @@ def _addOptions(addGroupFn, config):
                              "in an autoscaled cluster, as well as parameters to control the "
                              "level of provisioning.")
 
-    addOptionFn("--provisioner", dest="provisioner", choices=['cgcloud', 'aws'],
+    addOptionFn("--provisioner", dest="provisioner", choices=['aws'],
                 help="The provisioner for cluster auto-scaling. The currently supported choices are"
                      "'cgcloud' or 'aws'. The default is %s." % config.provisioner)
 
@@ -663,7 +672,7 @@ class Toil(object):
             with self._jobStore.writeSharedFileStream('rootJobReturnValue') as fH:
                 rootJob.prepareForPromiseRegistration(self._jobStore)
                 promise = rootJob.rv()
-                cPickle.dump(promise, fH)
+                cPickle.dump(promise, fH, protocol=cPickle.HIGHEST_PROTOCOL)
 
             # Setup the first wrapper and cache it
             rootJobGraph = rootJob._serialiseFirstJob(self._jobStore)
@@ -701,10 +710,6 @@ class Toil(object):
     def _setProvisioner(self):
         if self.config.provisioner is None:
             self._provisioner = None
-        elif self.config.provisioner == 'cgcloud':
-            logger.info('Using cgcloud provisioner.')
-            from toil.provisioners.cgcloud.provisioner import CGCloudProvisioner
-            self._provisioner = CGCloudProvisioner(self.config, self._batchSystem)
         elif self.config.provisioner == 'aws':
             logger.info('Using AWS provisioner.')
             from bd2k.util.ec2.credentials import enable_metadata_credential_caching
@@ -792,8 +797,8 @@ class Toil(object):
             batchSystemClass = SingleMachineBatchSystem
 
         elif config.batchSystem == 'gridengine' or config.batchSystem == 'gridEngine':
-            from toil.batchSystems.gridengine import GridengineBatchSystem
-            batchSystemClass = GridengineBatchSystem
+            from toil.batchSystems.gridengine import GridEngineBatchSystem
+            batchSystemClass = GridEngineBatchSystem
 
         elif config.batchSystem == 'lsf' or config.batchSystem == 'LSF':
             from toil.batchSystems.lsf import LSFBatchSystem
@@ -808,6 +813,10 @@ class Toil(object):
         elif config.batchSystem == 'slurm' or config.batchSystem == 'Slurm':
             from toil.batchSystems.slurm import SlurmBatchSystem
             batchSystemClass = SlurmBatchSystem
+
+        elif config.batchSystem == 'torque' or config.batchSystem == 'Torque':
+            from toil.batchSystems.torque import TorqueBatchSystem
+            batchSystemClass = TorqueBatchSystem
 
         else:
             raise RuntimeError('Unrecognised batch system: %s' % config.batchSystem)
@@ -836,7 +845,8 @@ class Toil(object):
                 logger.info('User script %s belongs to Toil. No need to hot-deploy it.', userScript)
                 userScript = None
             else:
-                if self._batchSystem.supportsHotDeployment():
+                if (self._batchSystem.supportsHotDeployment() and
+                        not self.config.disableHotDeployment):
                     # Note that by saving the ModuleDescriptor, and not the Resource we allow for
                     # redeploying a potentially modified user script on workflow restarts.
                     with self._jobStore.writeSharedFileStream('userScript') as f:
@@ -905,7 +915,7 @@ class Toil(object):
         Sets the environment variables required by the job store and those passed on command line.
         """
         for envDict in (self._jobStore.getEnv(), self.config.environment):
-            for k, v in envDict.iteritems():
+            for k, v in iteritems(envDict):
                 self._batchSystem.setEnv(k, v)
 
     def _serialiseEnv(self):
@@ -1089,3 +1099,18 @@ def getDirSizeRecursively(dirPath):
                 folderSize += fileStats.st_blocks * unixBlockSize
         totalSize += folderSize
     return totalSize
+
+
+def getFileSystemSize(dirPath):
+    """
+    Return the free space, and total size of the file system hosting `dirPath`.
+
+    :param str dirPath: A valid path to a directory.
+    :return: free space and total size of file system
+    :rtype: tuple
+    """
+    assert os.path.exists(dirPath)
+    diskStats = os.statvfs(dirPath)
+    freeSpace = diskStats.f_frsize * diskStats.f_bavail
+    diskSize = diskStats.f_frsize * diskStats.f_blocks
+    return freeSpace, diskSize

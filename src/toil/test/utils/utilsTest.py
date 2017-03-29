@@ -74,25 +74,40 @@ class UtilsTest(ToilTest):
     def statsCommand(self):
         return [self.toilMain, 'stats', self.toilDir, '--pretty']
 
-    @property
-    def statusCommand(self):
-        return [self.toilMain, 'status', self.toilDir, '--failIfNotComplete']
+    def statusCommand(self, failIfNotComplete=False):
+        commandTokens = [self.toilMain, 'status', self.toilDir]
+        if failIfNotComplete:
+            commandTokens.append('--failIfNotComplete')
+        return commandTokens
 
     @needs_aws
     @integrative
     def testAWSProvisionerUtils(self):
         clusterName = 'cluster-utils-test' + str(uuid.uuid4())
+        keyName = 'jenkins@jenkins-master'
         try:
-            system([self.toilMain, 'launch-cluster', '--nodeType=t2.micro', '--keyPairName=jenkins@jenkins-master',
-                    clusterName, '--provisioner=aws'])
+            # --provisioner flag should default to aws, so we're not explicitly
+            # specifying that here
+            system([self.toilMain, 'launch-cluster', '--nodeType=t2.micro',
+                    '--keyPairName=jenkins@jenkins-master', clusterName])
         finally:
             system([self.toilMain, 'destroy-cluster', '--provisioner=aws', clusterName])
         try:
             from toil.provisioners.aws.awsProvisioner import AWSProvisioner
+            
+            userTags = {'key1': 'value1', 'key2': 'value2', 'key3': 'value3'}
+            tags = {'Name': clusterName, 'Owner': keyName}
+            tags.update(userTags)
+
             # launch preemptable master with same name
-            system([self.toilMain, 'launch-cluster', '--nodeType=m3.medium:0.2', '--keyPairName=jenkins@jenkins-master',
-                    clusterName, '--provisioner=aws', '--logLevel=DEBUG'])
+            system([self.toilMain, 'launch-cluster', '-t', 'key1=value1', '-t', 'key2=value2', '--tag', 'key3=value3',
+                    '--nodeType=m3.medium:0.2', '--keyPairName=' + keyName, clusterName,
+                    '--provisioner=aws', '--logLevel=DEBUG'])
             system([self.toilMain, 'ssh-cluster', '--provisioner=aws', clusterName])
+
+            # test leader tags
+            leaderTags = AWSProvisioner._getLeader(clusterName).tags
+            self.assertEqual(tags, leaderTags)
 
             testStrings = ["'foo'",
                            '"foo"',
@@ -120,6 +135,9 @@ class UtilsTest(ToilTest):
             else:
                 self.fail('The remote command failed silently where it should have '
                           'raised an error')
+
+            AWSProvisioner.sshLeader(clusterName=clusterName,
+                                     args=['python', '-c', "import os; assert os.environ['TOIL_WORKDIR']=='/var/lib/toil'"])
 
             # `toil rsync-cluster`
             # Testing special characters - string.punctuation
@@ -173,7 +191,8 @@ class UtilsTest(ToilTest):
             system(toilCommand)
             finished = True
         except CalledProcessError:  # This happens when the script fails due to having unfinished jobs
-            self.assertRaises(CalledProcessError, system, self.statusCommand)
+            system(self.statusCommand())
+            self.assertRaises(CalledProcessError, system, self.statusCommand(failIfNotComplete=True))
             finished = False
         self.assertTrue(os.path.exists(self.toilDir))
 
@@ -187,13 +206,14 @@ class UtilsTest(ToilTest):
                 system(toilCommand + ['--restart'])
                 finished = True
             except CalledProcessError:  # This happens when the script fails due to having unfinished jobs
-                self.assertRaises(CalledProcessError, system, self.statusCommand)
+                system(self.statusCommand())
+                self.assertRaises(CalledProcessError, system, self.statusCommand(failIfNotComplete=True))
                 if totalTrys > 16:
                     self.fail()  # Exceeded a reasonable number of restarts
                 totalTrys += 1
 
                 # Check the toil status command does not issue an exception
-        system(self.statusCommand)
+        system(self.statusCommand())
 
         # Check if we try to launch after its finished that we get a JobException
         self.assertRaises(CalledProcessError, system, toilCommand + ['--restart'])
