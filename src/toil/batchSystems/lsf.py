@@ -80,7 +80,7 @@ def getjobexitcode(lsfJobID):
         elif line.find("PENDING REASONS") > -1:
             logger.debug("bjobs detected job pending for job: " + str(job))
             return None
-        elif line.find("Status <RUN>") > -1:
+        elif line.find("<RUN>") > -1:
             started = 1
 
         if started == 1:
@@ -179,6 +179,7 @@ class LSFBatchSystem(BatchSystemSupport):
         self.currentjobs.add(jobID)
         bsubline = prepareBsub(jobNode.cores, jobNode.memory, jobNode.jobName) + [jobNode.command]
         self.newJobsQueue.put((jobID, bsubline))
+        time.sleep(10)
         logger.debug("Issued the job command: %s with job id: %s " % (jobNode.command, str(jobID)))
         return jobID
 
