@@ -133,7 +133,7 @@ class Worker(Thread):
                     self.updatedJobsQueue.put((lsfJobID, exit))
                     self.runningjobs.remove(lsfJobID)
 
-            time.sleep(10)
+            time.sleep(1)
 
 class LSFBatchSystem(BatchSystemSupport):
     """

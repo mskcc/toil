@@ -29,7 +29,6 @@ import stat
 import tempfile
 import time
 import uuid
-
 from contextlib import contextmanager
 from fcntl import flock, LOCK_EX, LOCK_UN
 from functools import partial
@@ -1761,7 +1760,7 @@ class NonCachingFileStore(FileStore):
                             # Delete the old work directory if it still exists.  Do this only during
                             # the life of the program and dont' do it during the batch system
                             # cleanup.  Leave that to the batch system cleanup code.
-                            shutil.rmtree(jobState['jobDir'])
+                            #shutil.rmtree(jobState['jobDir'])
                         # Run any deferred functions associated with the job
                         logger.debug('Running user-defined deferred functions.')
                         cls._runDeferredFunctions(jobState['deferredFunctions'])
