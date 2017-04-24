@@ -43,7 +43,7 @@ def prepareBsub(cpu, mem, name):
     mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
     cpu = '' if cpu is None else '-n ' + str(int(cpu))
     name = '' if name is None else '-J ' + name.replace(" ","_")
-    bsubline = ["bsub", mem, cpu, name, "-cwd", ".", "-o", "/dev/null", "-e", "/dev/null", '-q', 'test']
+    bsubline = ["bsub", mem, cpu, name, "-cwd", ".", "-o", "/dev/null", "-e", "/dev/null"]
     logger.debug(bsubline)
     return bsubline
 
@@ -133,7 +133,7 @@ class Worker(Thread):
                     self.updatedJobsQueue.put((lsfJobID, exit))
                     self.runningjobs.remove(lsfJobID)
 
-            time.sleep(1)
+            time.sleep(10)
 
 class LSFBatchSystem(BatchSystemSupport):
     """
@@ -179,7 +179,7 @@ class LSFBatchSystem(BatchSystemSupport):
         self.currentjobs.add(jobID)
         bsubline = prepareBsub(jobNode.cores, jobNode.memory, jobNode.jobName) + [jobNode.command]
         self.newJobsQueue.put((jobID, bsubline))
-        time.sleep(10)
+        time.sleep(20)
         logger.debug("Issued the job command: %s with job id: %s " % (jobNode.command, str(jobID)))
         return jobID
 
