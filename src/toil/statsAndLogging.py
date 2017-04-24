@@ -127,7 +127,7 @@ class StatsAndLogging( object ):
                 jobStore.readStatsAndLogging(callback)
                 break
             if jobStore.readStatsAndLogging(callback) == 0:
-                time.sleep(0.5)  # Avoid cycling too fast
+                time.sleep(3)  # Avoid cycling too fast
 
         # Finish the stats file
         text = json.dumps(dict(total_time=str(time.time() - startTime),
