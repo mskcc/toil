@@ -133,7 +133,8 @@ class Worker(Thread):
                     self.updatedJobsQueue.put((lsfJobID, exit))
                     self.runningjobs.remove(lsfJobID)
 
-            time.sleep(10)
+            time.sleep(1)
+
 
 class LSFBatchSystem(BatchSystemSupport):
     """
@@ -179,7 +180,7 @@ class LSFBatchSystem(BatchSystemSupport):
         self.currentjobs.add(jobID)
         bsubline = prepareBsub(jobNode.cores, jobNode.memory, jobNode.jobName) + [jobNode.command]
         self.newJobsQueue.put((jobID, bsubline))
-        time.sleep(20)
+        time.sleep(5)
         logger.debug("Issued the job command: %s with job id: %s " % (jobNode.command, str(jobID)))
         return jobID
 
@@ -225,7 +226,13 @@ class LSFBatchSystem(BatchSystemSupport):
         and a how long they have been running for (in seconds).
         """
         times = {}
-        currentjobs = set(self.lsfJobIDs[x] for x in self.getIssuedBatchJobIDs())
+        currentjobs = set()
+        for x in self.getIssuedBatchJobIDs():
+            if x in self.lsfJobIDs:
+                currentjobs.add(self.lsfJobIDs[x])
+            else:
+                #not yet started
+                pass
         process = subprocess.Popen(["bjobs"], stdout = subprocess.PIPE)
 
         for curline in process.stdout:
