@@ -398,8 +398,10 @@ class FileStore(object):
         try:
             os.kill(pid, 0)
         except OSError as err:
-            if err.errno == errno.ESRCH:
+            if err.errno == errno.ESRCH or err.errno == errno.EPERM:
                 # ESRCH == No such process
+                # EPERM == not permitted...not our process
+                #CHARRIS HACKS
                 return False
             else:
                 raise
