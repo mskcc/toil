@@ -48,6 +48,9 @@ def prepareBsub(cpu, mem, name):
     bsubline = ["bsub", mem, cpu, name, "-cwd", ".", "-o", "/dev/null", "-e", "/dev/null"]
     if os.environ.get('TOIL_LSF_PROJECT') != None: #then this shit is defined
         bsubline  = bsubline + ['-P', '"' + os.environ.get('TOIL_LSF_PROJECT')+ '"']
+    lsfArgs = os.getenv('TOIL_LSF_ARGS')
+    if lsfArgs:
+        bsubline.extend(lsfArgs.split())
     logger.debug(bsubline)
     return bsubline
 
