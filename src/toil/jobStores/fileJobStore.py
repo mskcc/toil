@@ -169,7 +169,9 @@ class FileJobStore(AbstractJobStore):
                 os.close(fd)
                 os.unlink(absPath)
                 try:
-                    os.link(self._extractPathFromUrl(url), absPath)
+                    #charris says fuck this shit on lsf cluster
+                    os.symlink(self._extractPathFromUrl(url), absPath)
+                    #os.link(self._extractPathFromUrl(url), absPath)
                 except OSError:
                     shutil.copyfile(self._extractPathFromUrl(url), absPath)
                 return FileID(self._getRelativePath(absPath), os.stat(absPath).st_size)
@@ -177,7 +179,9 @@ class FileJobStore(AbstractJobStore):
                 self._requireValidSharedFileName(sharedFileName)
                 path = self._getSharedFilePath(sharedFileName)
                 try:
-                    os.link(self._extractPathFromUrl(url), path)
+                    #charris says fuck this shit on lsf cluster
+                    os.symlink(self._extractPathFromUrl(url), path)
+                    #os.link(self._extractPathFromUrl(url), path)
                 except:
                     shutil.copyfile(self._extractPathFromUrl(url), path)
                 return None
@@ -220,7 +224,11 @@ class FileJobStore(AbstractJobStore):
 
     def writeFile(self, localFilePath, jobStoreID=None):
         fd, absPath = self._getTempFile(jobStoreID)
-        shutil.copyfile(localFilePath, absPath)
+        #charris just making all kinds of changes he doesnt truly understand here huh
+        os.close(fd)
+        os.unlink(absPath)
+        os.symlink(localFilePath, absPath)
+        #shutil.copyfile(localFilePath, absPath)
         os.close(fd)
         return self._getRelativePath(absPath)
 
@@ -259,7 +267,9 @@ class FileJobStore(AbstractJobStore):
                     raise
         else:
             # ... otherwise we have to copy it.
-            shutil.copyfile(jobStoreFilePath, localFilePath)
+            #charris says fuck this shit on our cluster
+            os.symlink(jobStoreFilePath, localFilePath)
+            #shutil.copyfile(jobStoreFilePath, localFilePath)
 
     def deleteFile(self, jobStoreFileID):
         if not self.fileExists(jobStoreFileID):
