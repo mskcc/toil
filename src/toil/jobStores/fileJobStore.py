@@ -229,7 +229,7 @@ class FileJobStore(AbstractJobStore):
         os.unlink(absPath)
         os.symlink(localFilePath, absPath)
         #shutil.copyfile(localFilePath, absPath)
-        os.close(fd)
+        #os.close(fd)
         return self._getRelativePath(absPath)
 
     @contextmanager
