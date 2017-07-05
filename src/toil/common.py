@@ -1088,7 +1088,10 @@ def getDirSizeRecursively(dirPath):
         folderSize = 0
         for f in fileNames:
             fp = os.path.join(dirPath, f)
-            fileStats = os.stat(fp)
+            try:
+                fileStats = os.stat(fp)
+            except:
+                continue
             if fileStats.st_nlink > 1:
                 if fileStats.st_ino not in seenInodes:
                     folderSize += fileStats.st_blocks * unixBlockSize

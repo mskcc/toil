@@ -1289,7 +1289,8 @@ class CachingFileStore(FileStore):
                     # Do this only during the life of the program and dont' do it during the
                     # batch system cleanup.  Leave that to the batch system cleanup code.
                     if os.path.exists(jobState.jobDir):
-                        shutil.rmtree(jobState.jobDir)
+                        pass
+                        #shutil.rmtree(jobState.jobDir)
                     nodeInfo.sigmaJob -= jobState.jobReqs
                 logger.debug('Running user-defined deferred functions.')
                 cls._runDeferredFunctions(jobState.deferredFunctions)
@@ -1787,7 +1788,7 @@ class NonCachingFileStore(FileStore):
             try:
                 yield NonCachingFileStore._readJobState(filename)
             except IOError as e:
-                if e.errno == 2:
+                if e.errno == 2 or e.errno == 16:
                     # job finished & deleted its jobState file since the jobState files were discovered
                     continue
                 else:

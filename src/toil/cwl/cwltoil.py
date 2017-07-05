@@ -42,6 +42,7 @@ import logging
 import copy
 import functools
 from pprint import pprint
+import time
 
 # Python 3 compatibility imports
 from six.moves import xrange
@@ -293,7 +294,7 @@ class CWLJob(Job):
                                                            existing=existing))
         cwltool.pathmapper.adjustFileObjs(cwljob, pathToLoc)
         cwltool.pathmapper.adjustFileObjs(cwljob, addFilePartRefs)
-
+        time.sleep(20)
         # Run the tool
         opts = copy.deepcopy(self.executor_options)
         # Exports temporary directory for batch systems that reset TMPDIR

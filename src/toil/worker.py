@@ -347,7 +347,7 @@ def main():
                 #the jobGraph is either a shell ready to be deleted or has
                 #been scheduled after a failure to cleanup
                 break
-            
+            time.sleep(10)
             if FileStore._terminateEvent.isSet():
                 raise RuntimeError("The termination flag is set")
 
@@ -467,7 +467,7 @@ def main():
             statsDict.workers.time = str(time.time() - startTime)
             statsDict.workers.clock = str(totalCPUTime - startClock)
             statsDict.workers.memory = str(totalMemoryUsage)
-
+    
         # log the worker log path here so that if the file is truncated the path can still be found
         logger.info("Worker log can be found at %s. Set --cleanWorkDir to retain this log", localWorkerTempDir)
         logger.info("Finished running the chain of jobs on this node, we ran for a total of %f seconds", time.time() - startTime)
