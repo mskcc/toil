@@ -41,9 +41,15 @@ def prepareBsub(cpu, mem, name):
     if len(str(mem)) >= 10:
         mem = int(mem) / 1000
     logger.debug("Calculated %s cpus requested, %s mem" % (cpu, str(mem/1000000)))
-
-    mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
-    cpu = '' if cpu is None else '-n ' + str(int(cpu))
+    if name.find("CWL") > -1 or name.find("ResolveIndirect")> -1:
+        mem=5
+        cpu=1
+        mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
+        cpu = '' if cpu is None else '-n ' + str(int(cpu))
+        mem = mem + "-We 0:59"
+    else:
+        mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
+        cpu = '' if cpu is None else '-n ' + str(int(cpu))
     name = '' if name is None else '-J ' + name.replace(" ","_")
     bsubline = ["bsub", mem, cpu, name, "-cwd", ".", "-o", "/dev/null", "-e", "/dev/null"]
     if os.environ.get('TOIL_LSF_PROJECT') != None: #then this shit is defined
