@@ -46,7 +46,8 @@ def prepareBsub(cpu, mem, name):
         cpu=1
         mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
         cpu = '' if cpu is None else '-n ' + str(int(cpu))
-        mem = mem + " -We 0:59"
+        #apparently CWLJob takes >2hrs sometimes
+        #mem = mem + " -We 0:59"
     else:
         mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
         cpu = '' if cpu is None else '-n ' + str(int(cpu))

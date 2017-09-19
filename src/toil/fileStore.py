@@ -138,7 +138,9 @@ class FileStore(object):
                  terminates, removing all files it contains recursively.
         :rtype: str
         """
-        return os.path.abspath(tempfile.mkdtemp(prefix="t", dir=self.localTempDir))
+        directory = tempfile.mkdtemp(prefix="t", dir=self.localTempDir)
+        os.chmod(directory, "770")
+        return os.path.abspath(directory)
 
     def getLocalTempFile(self):
         """
