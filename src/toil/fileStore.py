@@ -139,7 +139,7 @@ class FileStore(object):
         :rtype: str
         """
         directory = tempfile.mkdtemp(prefix="t", dir=self.localTempDir)
-        os.chmod(directory, "770")
+        os.chmod(directory, 0o770)
         return os.path.abspath(directory)
 
     def getLocalTempFile(self):

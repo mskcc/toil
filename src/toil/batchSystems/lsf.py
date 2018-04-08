@@ -42,12 +42,12 @@ def prepareBsub(cpu, mem, name):
         mem = int(mem) / 1000
     logger.debug("Calculated %s cpus requested, %s mem" % (cpu, str(mem/1000000)))
     if (name.find("CWL") > -1) or (name.find("ResolveIndirect") > -1):
-        mem=5000000
+        mem=16000000
         cpu=1
         mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
         cpu = '' if cpu is None else '-n ' + str(int(cpu))
-        #apparently CWLJob takes >2hrs sometimes
-        #mem = mem + " -We 0:59"
+        # CWLJob takes >2hrs sometimes, so except for that, use the short queue
+        mem += '' if (name.find("CWLJob") > -1) else ' -We 0:59'
     else:
         mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
         cpu = '' if cpu is None else '-n ' + str(int(cpu))
