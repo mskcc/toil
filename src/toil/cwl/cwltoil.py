@@ -54,6 +54,7 @@ import logging
 import copy
 import functools
 from typing import Text
+import time
 
 
 # Python 3 compatibility imports
@@ -426,7 +427,7 @@ class CWLJob(Job):
 
         self.cwljob = cwljob
         try:
-            self.jobName = str(self.cwltool.tool['id'])
+            self.jobName = " ".join(tool.tool['baseCommand'])
         except KeyError:
             # fall back to the Toil defined class name if the tool doesn't have an identifier
             pass
@@ -455,6 +456,7 @@ class CWLJob(Job):
             'no_match_user': False})
         del opts['job_order']
 
+        time.sleep(20)
         # Run the tool
         (output, status) = cwltool.main.single_job_executor(**opts)
         if status != "success":

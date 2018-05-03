@@ -321,7 +321,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
                 #been scheduled after a failure to cleanup
                 logger.debug("No user job to run, so finishing")
                 break
-            
+            time.sleep(10)
             if FileStore._terminateEvent.isSet():
                 raise RuntimeError("The termination flag is set")
 

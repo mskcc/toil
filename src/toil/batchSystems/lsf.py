@@ -117,7 +117,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                     logger.debug("bjobs detected job failed for job: "
                                  "{}".format(job))
                     return 1
-                elif line.find("Started on ") > -1:
+                elif line.find("<RUN>") > -1:
                     started = 1
 
             if started == 1:
@@ -149,7 +149,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
         Implementation-specific helper methods
         """
         @staticmethod
-        def prepareBsub(cpu, mem, jobID):
+        def prepareBsub(cpu, mem, jobID, jobName):
             """
             Make a bsub commandline to execute.
 
@@ -159,24 +159,25 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
               jobID: ID number of the job
             """
             if mem:
-                if per_core_reservation():
-                    mem = float(mem)/1024**3/math.ceil(cpu)
-                    mem_resource = parse_memory_resource(mem)
-                    mem_limit = parse_memory_limit(mem)
-                else:
-                    mem = old_div(float(mem), 1024**3)
-                    mem_resource = parse_memory_resource(mem)
-                    mem_limit = parse_memory_limit(mem)
+                converted_mem = old_div(float(mem), 1024**3)
+                if converted_mem < 1:
+                    converted_mem = math.ceil(old_div(float(mem*1000), 1024**3))
+                mem_resource = parse_memory_resource(converted_mem)
+                mem_limit = parse_memory_limit(converted_mem)
                 bsubMem = ['-R', 'select[type==X86_64 && mem > {m}] '
                            'rusage[mem={m}]'.format(m=mem_resource),
                            '-M', str(mem_limit)]
             else:
                 bsubMem = []
             bsubCpu = [] if cpu is None else ['-n', str(math.ceil(cpu))]
+            bsubName = [] if jobName is None else ['-J',jobName.replace(" ","_")]
             bsubline = ["bsub", "-cwd", ".", "-o", "/dev/null",
                         "-e", "/dev/null", "-J", "toil_job_{}".format(jobID)]
             bsubline.extend(bsubMem)
             bsubline.extend(bsubCpu)
+            bsubline.extend(bsubName)
+            if os.environ.get('TOIL_LSF_PROJECT') != None:
+                bsubline  = bsubline + ['-P', '"' + os.environ.get('TOIL_LSF_PROJECT')+ '"']
             lsfArgs = os.getenv('TOIL_LSF_ARGS')
             if lsfArgs:
                 bsubline.extend(lsfArgs.split())

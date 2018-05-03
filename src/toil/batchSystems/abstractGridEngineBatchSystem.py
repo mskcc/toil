@@ -111,10 +111,10 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
             while (len(self.waitingJobs) > 0
                    and sum(self.allocatedCpus.values()) < int(self.boss.maxCores)):
                 activity = True
-                jobID, cpu, memory, command = self.waitingJobs.pop(0)
+                jobID, cpu, memory, command, jobName = self.waitingJobs.pop(0)
 
                 # prepare job submission command
-                subLine = self.prepareSubmission(cpu, memory, jobID, command)
+                subLine = self.prepareSubmission(cpu, memory, jobID, command, jobName)
                 logger.debug("Running %r", subLine)
 
                 # submit job and get batch system ID
@@ -317,7 +317,7 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
             self.checkResourceRequest(jobNode.memory, jobNode.cores, jobNode.disk)
             jobID = self.getNextJobID()
             self.currentJobs.add(jobID)
-            self.newJobsQueue.put((jobID, jobNode.cores, jobNode.memory, jobNode.command))
+            self.newJobsQueue.put((jobID, jobNode.cores, jobNode.memory, jobNode.command, jobNode.jobName))
             logger.debug("Issued the job command: %s with job id: %s ", jobNode.command, str(jobID))
         return jobID
 
