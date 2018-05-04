@@ -67,8 +67,8 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
         def killJob(self, jobID):
             subprocess.check_call(['bkill', self.getBatchSystemID(jobID)])
 
-        def prepareSubmission(self, cpu, memory, jobID, command):
-            return self.prepareBsub(cpu, memory, jobID) + [command]
+        def prepareSubmission(self, cpu, memory, jobID, command, jobName):
+            return self.prepareBsub(cpu, memory, jobID, jobName) + [command]
 
         def submitJob(self, subLine):
             combinedEnv = self.boss.environment
