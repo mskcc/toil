@@ -177,7 +177,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
             bsubline.extend(bsubCpu)
             bsubline.extend(bsubName)
             if os.environ.get('TOIL_LSF_PROJECT') != None:
-                bsubline  = bsubline + ['-P', '"' + os.environ.get('TOIL_LSF_PROJECT')+ '"']
+                bsubline  = bsubline + ['-P', os.environ.get('TOIL_LSF_PROJECT')]
             lsfArgs = os.getenv('TOIL_LSF_ARGS')
             if lsfArgs:
                 bsubline.extend(lsfArgs.split())
