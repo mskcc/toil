@@ -427,7 +427,7 @@ class CWLJob(Job):
 
         self.cwljob = cwljob
         try:
-            self.jobName = "_".join(tool.tool['baseCommand'] + tool.tool['arguments'])
+            self.jobName = str(tool.tool['id'])
         except KeyError:
             # fall back to the Toil defined class name if the tool doesn't have an identifier
             pass
