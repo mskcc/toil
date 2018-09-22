@@ -146,6 +146,7 @@ class Worker(Thread):
                 if exit is not None:
                     self.updatedJobsQueue.put((lsfJobID, exit))
                     self.runningjobs.remove(lsfJobID)
+                time.sleep(0.1)
 
             time.sleep(1)
 
