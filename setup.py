@@ -20,26 +20,40 @@ def runSetup():
     Calls setup(). This function exists so the setup() invocation preceded more internal
     functionality. The `version` module is imported dynamically by importVersion() below.
     """
-    boto = 'boto==2.38.0'
-    boto3 = 'boto3==1.4.7'
-    futures = 'futures==3.0.5'
-    pycryptodome = 'pycryptodome==3.5.0'
+    boto = 'boto==2.48.0'
+    boto3 = 'boto3>=1.7.50, <2.0'
+    futures = 'futures==3.1.1'
+    pycryptodome = 'pycryptodome==3.5.1'
     psutil = 'psutil==3.0.1'
     protobuf = 'protobuf==3.5.1'
-    azure = 'azure==2.0.0'
     azureCosmosdbTable = 'azure-cosmosdb-table==0.37.1'
     azureAnsible = 'ansible[azure]==2.5.0a1'
     azureStorage = 'azure-storage==0.35.1'
-    msRest = 'msrest==0.4.25'
+    secretstorage = 'secretstorage<3'
     pynacl = 'pynacl==1.1.2'
     gcs = 'google-cloud-storage==1.6.0'
     gcs_oauth2_boto_plugin = 'gcs_oauth2_boto_plugin==1.14'
     apacheLibcloud = 'apache-libcloud==2.2.1'
-    cwltool = 'cwltool==1.0.20180306140409'
-    schemaSalad = 'schema-salad >= 2.6, < 3'
+    cwltool = 'cwltool==1.0.20180518123035'
+    schemaSalad = 'schema-salad>=2.6, <3'
     galaxyLib = 'galaxy-lib==17.9.3'
-    cwltest = 'cwltest>=1.0.20180130081614'
     htcondor = 'htcondor>=8.6.0'
+    dill = 'dill==0.2.7.1'
+    six = 'six>=1.10.0'
+    future = 'future'
+    requests = 'requests==2.18.4'
+    docker = 'docker==2.5.1'
+    subprocess32 = 'subprocess32<=3.5.2'
+    dateutil = 'python-dateutil'
+
+    core_reqs = [
+        dill,
+        six,
+        future,
+        requests,
+        docker,
+        dateutil,
+        subprocess32]
 
     mesos_reqs = [
         psutil,
@@ -50,11 +64,10 @@ def runSetup():
         futures,
         pycryptodome]
     azure_reqs = [
-        azure,
         azureCosmosdbTable,
+        secretstorage,
         azureAnsible,
-        azureStorage,
-        msRest]
+        azureStorage]
     encryption_reqs = [
         pynacl]
     google_reqs = [
@@ -64,8 +77,7 @@ def runSetup():
     cwl_reqs = [
         cwltool,
         schemaSalad,
-        galaxyLib,
-        cwltest]
+        galaxyLib]
     wdl_reqs = []
     htcondor_reqs = [
         htcondor]
@@ -80,8 +92,12 @@ def runSetup():
         htcondor_reqs
 
     # htcondor is not supported by apple
-    if sys.platform != 'linux' or 'linux2':
+    if sys.platform != 'linux' and sys.platform != 'linux2':
         all_reqs.remove(htcondor)
+
+    # remove the subprocess32 backport if not python2
+    if not sys.version_info[0] == 2:
+        core_reqs.remove(subprocess32)
 
     setup(
         name='toil',
@@ -92,15 +108,7 @@ def runSetup():
         url="https://github.com/BD2KGenomics/toil",
         classifiers=["License :: OSI Approved :: Apache Software License"],
         license="Apache License v2.0",
-        install_requires=[
-            'bd2k-python-lib>=1.14a1.dev35',
-            'dill==0.2.7.1',
-            'six>=1.10.0',
-            'future',
-            'requests==2.18.4',
-            'docker==2.5.1',
-            'subprocess32==3.5.0rc1',
-            'python-dateutil'],
+        install_requires=core_reqs,
         extras_require={
             'mesos': mesos_reqs,
             'aws': aws_reqs,
@@ -162,7 +170,7 @@ def importVersion():
                 raise
 
         if old != new:
-            with NamedTemporaryFile(dir='src/toil', prefix='version.py.', delete=False) as f:
+            with NamedTemporaryFile(mode='w',dir='src/toil', prefix='version.py.', delete=False) as f:
                 f.write(new)
             os.rename(f.name, 'src/toil/version.py')
     # Unfortunately, we can't use a straight import here because that would also load the stuff

@@ -1,4 +1,4 @@
-# Copyright (C) 2015-2016 Regents of the University of California
+# Copyright (C) 2015-2018 Regents of the University of California
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,33 +13,100 @@
 # limitations under the License.
 from abc import ABCMeta, abstractmethod
 from builtins import object
-from collections import namedtuple
-from itertools import count
+from functools import total_ordering
 import logging
-import pipes
-import socket
+import os.path
 from toil import subprocess
+from toil import applianceSelf
 
 from future.utils import with_metaclass
 
-from bd2k.util.retry import never
+from toil.lib.retry import never
 a_short_time = 5
 
 log = logging.getLogger(__name__)
 
 
-Shape = namedtuple("_Shape", "wallTime memory cores disk preemptable")
-"""
-Represents a job or a node's "shape", in terms of the dimensions of memory, cores, disk and
-wall-time allocation.
+@total_ordering
+class Shape(object):
+    """
+    Represents a job or a node's "shape", in terms of the dimensions of memory, cores, disk and
+    wall-time allocation.
 
-The wallTime attribute stores the number of seconds of a node allocation, e.g. 3600 for AWS,
-or 60 for Azure. FIXME: and for jobs?
+    The wallTime attribute stores the number of seconds of a node allocation, e.g. 3600 for AWS,
+    or 60 for Azure. FIXME: and for jobs?
 
-The memory and disk attributes store the number of bytes required by a job (or provided by a
-node) in RAM or on disk (SSD or HDD), respectively.
-"""
+    The memory and disk attributes store the number of bytes required by a job (or provided by a
+    node) in RAM or on disk (SSD or HDD), respectively.
+    """
+    def __init__(self, wallTime, memory, cores, disk, preemptable):
+        self.wallTime = wallTime
+        self.memory = memory
+        self.cores = cores
+        self.disk = disk
+        self.preemptable = preemptable
 
+    def __eq__(self, other):
+        return (self.wallTime == other.wallTime and
+                self.memory == other.memory and
+                self.cores == other.cores and
+                self.disk == other.disk and
+                self.preemptable == other.preemptable)
+
+    def __gt__(self, other):
+        if self.preemptable < other.preemptable:
+            return True
+        elif self.preemptable > other.preemptable:
+            return False
+        elif self.memory > other.memory:
+            return True
+        elif self.memory < other.memory:
+            return False
+        elif self.cores > other.cores:
+            return True
+        elif self.cores < other.cores:
+            return False
+        elif self.disk > other.disk:
+            return True
+        elif self.disk < other.disk:
+            return False
+        elif self.wallTime > other.wallTime:
+            return True
+        elif self.wallTime < other.wallTime:
+            return False
+        else:
+            return False
+
+    def __str__(self):
+        return "\nShape wallTime: %s\n" \
+               "Shape memory: %s\n" \
+               "Shape cores: %s\n" \
+               "Shape disk: %s\n" \
+               "Shape preemptable: %s\n" \
+               "\n" % \
+               (self.wallTime,
+                self.memory,
+                self.cores,
+                self.disk,
+                self.preemptable)
+
+    def __repr__(self):
+        return "Shape(wallTime=%s, memory=%s, cores=%s, disk=%s, preemptable=%s)" % \
+               (self.wallTime,
+                self.memory,
+                self.cores,
+                self.disk,
+                self.preemptable)
+                
+    def __hash__(self):
+        # Since we replaced __eq__ we need to replace __hash__ as well.
+        return hash(
+            (self.wallTime,
+             self.memory,
+             self.cores,
+             self.disk,
+             self.preemptable))
+        
 
 class AbstractProvisioner(with_metaclass(ABCMeta, object)):
     """
@@ -47,21 +114,47 @@ class AbstractProvisioner(with_metaclass(ABCMeta, object)):
     Toil cluster.
     """
 
-    def __init__(self, config=None):
-        """
-        Initialize provisioner. If config and batchSystem are not specified, the
-        provisioner is being used to manage nodes without a workflow
+    LEADER_HOME_DIR = '/root/' # home directory in the Toil appliance on an instance
 
-        :param config: Config from common.py
-        :param batchSystem: The batchSystem used during run
+    def __init__(self, clusterName=None, zone=None, nodeStorage=50):
         """
-        self.config = config
-        self.stop = False
-        self.staticNodesDict = {}  # dict with keys of nodes private IPs, val is nodeInfo
-        self.static = {}
+        Initialize provisioner.
 
-    def getStaticNodes(self, preemptable):
-        return self.static[preemptable]
+        :param clusterName: The cluster identifier.
+        :param zone: The zone the cluster runs in.
+        :param nodeStorage: The amount of storage on the worker instances, in gigabytes.
+        """
+        self.clusterName = clusterName
+        self._zone = zone
+        self._nodeStorage = nodeStorage
+        self._leaderPrivateIP = None
+
+    def readClusterSettings(self):
+        """
+        Initialize class from an existing cluster. This method assumes that
+        the instance we are running on is the leader.
+        """
+        raise NotImplementedError
+
+    def setAutoscaledNodeTypes(self, nodeTypes):
+        """
+        Set node types, shapes and spot bids. Preemptable nodes will have the form "type:spotBid".
+        :param nodeTypes: A list of node types
+        """
+        self._spotBidsMap = {}
+        self.nodeShapes = []
+        self.nodeTypes = []
+        for nodeTypeStr in nodeTypes:
+            nodeBidTuple = nodeTypeStr.split(":")
+            if len(nodeBidTuple) == 2:
+                #This is a preemptable node type, with a spot bid
+                nodeType, bid = nodeBidTuple
+                self.nodeTypes.append(nodeType)
+                self.nodeShapes.append(self.getNodeShape(nodeType, preemptable=True))
+                self._spotBidsMap[nodeType] = bid
+            else:
+                self.nodeTypes.append(nodeTypeStr)
+                self.nodeShapes.append(self.getNodeShape(nodeTypeStr, preemptable=False))
 
     @staticmethod
     def retryPredicate(e):
@@ -75,26 +168,26 @@ class AbstractProvisioner(with_metaclass(ABCMeta, object)):
         """
         return never(e)
 
-    def setStaticNodes(self, nodes, preemptable):
+    @abstractmethod
+    def launchCluster(self, leaderNodeType, leaderStorage, owner, **kwargs):
         """
-        Used to track statically provisioned nodes. These nodes are
-        treated differently than autoscaled nodes in that they should not
-        be automatically terminated.
+        Initialize a cluster and create a leader node.
 
-        :param nodes: list of Node objects
+        :param leaderNodeType: The leader instance.
+        :param leaderStorage: The amount of disk to allocate to the leader in gigabytes.
+        :param owner: Tag identifying the owner of the instances.
+
         """
-        prefix = 'non-' if not preemptable else ''
-        log.debug("Adding %s to %spreemptable static nodes", nodes, prefix)
-        if nodes is not None:
-            self.static[preemptable] = {node.privateIP : node for node in nodes}
+        raise NotImplementedError
 
     @abstractmethod
-    def addNodes(self, nodeType, numNodes, preemptable):
+    def addNodes(self, nodeType, numNodes, preemptable, spotBid=None):
         """
         Used to add worker nodes to the cluster
 
         :param numNodes: The number of nodes to add
         :param preemptable: whether or not the nodes will be preemptable
+        :param spotBid: The bid for preemptable nodes if applicable (this can be set in config, also).
         :return: number of nodes successfully added
         """
         raise NotImplementedError
@@ -105,6 +198,13 @@ class AbstractProvisioner(with_metaclass(ABCMeta, object)):
         Terminate the nodes represented by given Node objects
 
         :param nodes: list of Node objects
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def getLeader(self):
+        """
+        :return: The leader node.
         """
         raise NotImplementedError
 
@@ -121,17 +221,6 @@ class AbstractProvisioner(with_metaclass(ABCMeta, object)):
         raise NotImplementedError
 
     @abstractmethod
-    def remainingBillingInterval(self, node):
-        """
-        Calculate how much of a node's allocated billing interval is
-        left in this cycle.
-
-        :param node: Node object
-        :return: float from 0 -> 1.0 representing percentage of pre-paid time left in cycle
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     def getNodeShape(self, nodeType=None, preemptable=False):
         """
         The shape of a preemptable or non-preemptable node managed by this provisioner. The node
@@ -144,38 +233,8 @@ class AbstractProvisioner(with_metaclass(ABCMeta, object)):
         """
         raise NotImplementedError
 
-    @classmethod
     @abstractmethod
-    def rsyncLeader(cls, clusterName, args, **kwargs):
-        """
-        Rsyncs to the leader of the cluster with the specified name. The arguments are passed directly to
-        Rsync.
-
-        :param clusterName: name of the cluster to target
-        :param args: list of string arguments to rsync. Identical to the normal arguments to rsync, but the
-           host name of the remote host can be omitted. ex) ['/localfile', ':/remotedest']
-        :param \**kwargs:
-           See below
-
-        :Keyword Arguments:
-            * *strict*: if False, strict host key checking is disabled. (Enabled by default.)
-        """
-        raise NotImplementedError
-
-    @classmethod
-    @abstractmethod
-    def sshLeader(cls, clusterName, args, **kwargs):
-        """
-        SSH into the leader instance of the specified cluster with the specified arguments to SSH.
-        :param clusterName: name of the cluster to target
-        :param args: list of string arguments to ssh.
-        :param strict: If False, strict host key checking is disabled. (Enabled by default.)
-        """
-        raise NotImplementedError
-
-    @classmethod
-    @abstractmethod
-    def destroyCluster(cls, clusterName):
+    def destroyCluster(self):
         """
         Terminates all nodes in the specified cluster and cleans up all resources associated with the
         cluser.
@@ -183,119 +242,184 @@ class AbstractProvisioner(with_metaclass(ABCMeta, object)):
         """
         raise NotImplementedError
 
-    @classmethod
-    def _waitForSSHPort(cls, ip_address):
+    def _setSSH(self):
         """
-        Wait until the instance represented by this box is accessible via SSH.
-
-        :return: the number of unsuccessful attempts to connect to the port before a the first
-        success
+        Generate a key pair, save it in /root/.ssh/id_rsa.pub, and return the public key.
+        The file /root/.sshSuccess is used to prevent this operation from running twice.
+        :return Public key.
         """
-        log.info('Waiting for ssh port to open...')
-        for i in count():
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            try:
-                s.settimeout(a_short_time)
-                s.connect((ip_address, 22))
-                log.info('...ssh port open')
-                return i
-            except socket.error:
-                pass
-            finally:
-                s.close()
+        if not os.path.exists('/root/.sshSuccess'):
+            subprocess.check_call(['ssh-keygen', '-f', '/root/.ssh/id_rsa', '-t', 'rsa', '-N', ''])
+            with open('/root/.sshSuccess', 'w') as f:
+                f.write('written here because of restrictive permissions on .ssh dir')
+        os.chmod('/root/.ssh', 0o700)
+        subprocess.check_call(['bash', '-c', 'eval $(ssh-agent) && ssh-add -k'])
+        with open('/root/.ssh/id_rsa.pub') as f:
+            masterPublicKey = f.read()
+        masterPublicKey = masterPublicKey.split(' ')[1]  # take 'body' of key
+        # confirm it really is an RSA public key
+        assert masterPublicKey.startswith('AAAAB3NzaC1yc2E'), masterPublicKey
+        return masterPublicKey
 
-    @classmethod
-    def _sshAppliance(cls, leaderIP, *args, **kwargs):
-        """
-        :param str leaderIP: IP of the master
-        :param args: arguments to execute in the appliance
-        :param kwargs: tty=bool tells docker whether or not to create a TTY shell for
-            interactive SSHing. The default value is False. Input=string is passed as
-            input to the Popen call.
-        """
-        kwargs['appliance'] = True
-        return cls._coreSSH(leaderIP, *args, **kwargs)
 
-    @classmethod
-    def _sshInstance(cls, nodeIP, *args, **kwargs):
-        # returns the output from the command
-        kwargs['collectStdout'] = True
-        return cls._coreSSH(nodeIP, *args, **kwargs)
 
-    @classmethod
-    def _coreSSH(cls, nodeIP, *args, **kwargs):
-        """
-        If strict=False, strict host key checking will be temporarily disabled.
-        This is provided as a convenience for internal/automated functions and
-        ought to be set to True whenever feasible, or whenever the user is directly
-        interacting with a resource (e.g. rsync-cluster or ssh-cluster). Assumed
-        to be False by default.
 
-        kwargs: input, tty, appliance, collectStdout, sshOptions, strict
-        """
-        commandTokens = ['ssh', '-t']
-        strict = kwargs.pop('strict', False)
-        if not strict:
-            kwargs['sshOptions'] = ['-oUserKnownHostsFile=/dev/null', '-oStrictHostKeyChecking=no'] + kwargs.get('sshOptions', [])
-        sshOptions = kwargs.pop('sshOptions', None)
-        # Forward port 3000 for grafana dashboard
-        commandTokens.extend(['-L', '3000:localhost:3000', '-L', '9090:localhost:9090'])
-        if sshOptions:
-            # add specified options to ssh command
-            assert isinstance(sshOptions, list)
-            commandTokens.extend(sshOptions)
-        # specify host
-        commandTokens.append('core@%s' % nodeIP)
 
-        appliance = kwargs.pop('appliance', None)
-        if appliance:
-            # run the args in the appliance
-            tty = kwargs.pop('tty', None)
-            ttyFlag = '-t' if tty else ''
-            commandTokens += ['docker', 'exec', '-i', ttyFlag, 'toil_leader']
 
-        inputString = kwargs.pop('input', None)
-        if inputString is not None:
-            kwargs['stdin'] = subprocess.PIPE
 
-        collectStdout = kwargs.pop('collectStdout', None)
-        if collectStdout:
-            kwargs['stdout'] = subprocess.PIPE
+    cloudConfigTemplate = """#cloud-config
 
-        log.debug('Node %s: %s', nodeIP, ' '.join(args))
-        args = list(map(pipes.quote, args))
-        commandTokens += args
-        log.debug('Full command %s', ' '.join(commandTokens))
-        popen = subprocess.Popen(commandTokens, **kwargs)
-        stdout, stderr = popen.communicate(input=inputString)
-        # at this point the process has already exited, no need for a timeout
-        resultValue = popen.wait()
-        if resultValue != 0:
-            raise RuntimeError('Executing the command "%s" on the appliance returned a non-zero '
-                               'exit code %s with stdout %s and stderr %s' % (' '.join(args), resultValue, stdout, stderr))
-        assert stderr is None
-        return stdout
+write_files:
+    - path: "/home/core/volumes.sh"
+      permissions: "0777"
+      owner: "root"
+      content: |
+        #!/bin/bash
+        set -x
+        ephemeral_count=0
+        drives=""
+        directories="toil mesos docker cwl"
+        for drive in /dev/xvd{{a..z}} /dev/nvme{{0..26}}n1; do
+            echo checking for $drive
+            if [ -b $drive ]; then
+                echo found it
+                if mount | grep $drive; then
+                    echo "already mounted, likely a root device"
+                else
+                    ephemeral_count=$((ephemeral_count + 1 ))
+                    drives="$drives $drive"
+                    echo increased ephemeral count by one
+                fi
+            fi
+        done
+        if (("$ephemeral_count" == "0" )); then
+            echo no ephemeral drive
+            for directory in $directories; do
+                sudo mkdir -p /var/lib/$directory
+            done
+            exit 0
+        fi
+        sudo mkdir /mnt/ephemeral
+        if (("$ephemeral_count" == "1" )); then
+            echo one ephemeral drive to mount
+            sudo mkfs.ext4 -F $drives
+            sudo mount $drives /mnt/ephemeral
+        fi
+        if (("$ephemeral_count" > "1" )); then
+            echo multiple drives
+            for drive in $drives; do
+                dd if=/dev/zero of=$drive bs=4096 count=1024
+            done
+            sudo mdadm --create -f --verbose /dev/md0 --level=0 --raid-devices=$ephemeral_count $drives # determine force flag
+            sudo mkfs.ext4 -F /dev/md0
+            sudo mount /dev/md0 /mnt/ephemeral
+        fi
+        for directory in $directories; do
+            sudo mkdir -p /mnt/ephemeral/var/lib/$directory
+            sudo mkdir -p /var/lib/$directory
+            sudo mount --bind /mnt/ephemeral/var/lib/$directory /var/lib/$directory
+        done
 
-    @classmethod
-    def _coreRsync(cls, ip, args, applianceName='toil_leader', **kwargs):
-        remoteRsync = "docker exec -i %s rsync" % applianceName  # Access rsync inside appliance
-        parsedArgs = []
-        sshCommand = "ssh"
-        strict = kwargs.pop('strict', False)
-        if not strict:
-            sshCommand = "ssh -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no"
-        hostInserted = False
-        # Insert remote host address
-        for i in args:
-            if i.startswith(":") and not hostInserted:
-                i = ("core@%s" % ip) + i
-                hostInserted = True
-            elif i.startswith(":") and hostInserted:
-                raise ValueError("Cannot rsync between two remote hosts")
-            parsedArgs.append(i)
-        if not hostInserted:
-            raise ValueError("No remote host found in argument list")
-        command = ['rsync', '-e', sshCommand, '--rsync-path', remoteRsync]
-        log.debug("Running %r.", command + parsedArgs)
+coreos:
+    update:
+      reboot-strategy: off
+    units:
+    - name: "volume-mounting.service"
+      command: "start"
+      content: |
+        [Unit]
+        Description=mounts ephemeral volumes & bind mounts toil directories
+        Before=docker.service
 
-        return subprocess.check_call(command + parsedArgs)
+        [Service]
+        Type=oneshot
+        Restart=no
+        ExecStart=/usr/bin/bash /home/core/volumes.sh
+
+    - name: "toil-{role}.service"
+      command: "start"
+      content: |
+        [Unit]
+        Description=toil-{role} container
+        After=docker.service
+
+        [Service]
+        Restart=on-failure
+        RestartSec=2
+        ExecStartPre=-/usr/bin/docker rm toil_{role}
+        ExecStart=/usr/bin/docker run \
+            --entrypoint={entrypoint} \
+            --net=host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /var/lib/mesos:/var/lib/mesos \
+            -v /var/lib/docker:/var/lib/docker \
+            -v /var/lib/toil:/var/lib/toil \
+            -v /var/lib/cwl:/var/lib/cwl \
+            -v /tmp:/tmp \
+            --name=toil_{role} \
+            {dockerImage} \
+            {mesosArgs}
+    - name: "node-exporter.service"
+      command: "start"
+      content: |
+        [Unit]
+        Description=node-exporter container
+        After=docker.service
+
+        [Service]
+        Restart=on-failure
+        RestartSec=2
+        ExecStartPre=-/usr/bin/docker rm node_exporter
+        ExecStart=/usr/bin/docker run \
+            -p 9100:9100 \
+            -v /proc:/host/proc \
+            -v /sys:/host/sys \
+            -v /:/rootfs \
+            --name node-exporter \
+            --restart always \
+            prom/node-exporter:v0.15.2 \
+            --path.procfs /host/proc \
+            --path.sysfs /host/sys \
+            --collector.filesystem.ignored-mount-points ^/(sys|proc|dev|host|etc)($|/)
+"""
+
+    sshTemplate = """ssh_authorized_keys:
+    - "ssh-rsa {sshKey}"
+"""
+
+
+       # If keys are rsynced, then the mesos-slave needs to be started after the keys have been
+        # transferred. The waitForKey.sh script loops on the new VM until it finds the keyPath file, then it starts the
+        # mesos-slave. If there are multiple keys to be transferred, then the last one to be transferred must be
+        # set to keyPath.
+
+    MESOS_LOG_DIR = '--log_dir=/var/lib/mesos '
+    LEADER_DOCKER_ARGS = '--registry=in_memory --cluster={name}'
+    # --no-systemd_enable_support is necessary in Ubuntu 16.04 (otherwise,
+    # Mesos attempts to contact systemd but can't find its run file)
+    WORKER_DOCKER_ARGS = '--work_dir=/var/lib/mesos --master={ip}:5050 --attributes=preemptable:{preemptable} --no-hostname_lookup --no-systemd_enable_support'
+    def _getCloudConfigUserData(self, role, masterPublicKey=None, keyPath=None, preemptable=False):
+        if role == 'leader':
+            entryPoint = 'mesos-master'
+            mesosArgs = self.MESOS_LOG_DIR + self.LEADER_DOCKER_ARGS.format(name=self.clusterName)
+        elif role == 'worker':
+            entryPoint = 'mesos-slave'
+            mesosArgs = self.MESOS_LOG_DIR + self.WORKER_DOCKER_ARGS.format(ip=self._leaderPrivateIP,
+                                                        preemptable=preemptable)
+        else:
+            raise RuntimeError("Unknown role %s" % role)
+
+        template = self.cloudConfigTemplate
+        if masterPublicKey:
+            template += self.sshTemplate
+        if keyPath:
+            mesosArgs = keyPath + ' ' + mesosArgs
+            entryPoint = "waitForKey.sh"
+        templateArgs = dict(role=role,
+                            dockerImage=applianceSelf(),
+                            entrypoint=entryPoint,
+                            sshKey=masterPublicKey,   # ignored if None
+                            mesosArgs=mesosArgs)
+        userData = template.format(**templateArgs)
+        return userData
+

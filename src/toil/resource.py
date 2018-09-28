@@ -34,11 +34,11 @@ from urllib.error import HTTPError
 from zipfile import ZipFile
 
 # Python 3 compatibility imports
-from bd2k.util.retry import retry
+from toil.lib.retry import retry
 from six.moves.urllib.request import urlopen
 
-from bd2k.util import strict_bool
-from bd2k.util.iterables import concat
+from toil.lib.memoize import strict_bool
+from toil.lib.iterables import concat
 
 from toil import inVirtualEnv
 
@@ -209,7 +209,7 @@ class Resource(namedtuple('Resource', ('name', 'pathHash', 'url', 'contentHash')
 
     @classmethod
     def _pathHash(cls, path):
-        return hashlib.md5(path).hexdigest()
+        return hashlib.md5(path.encode('utf-8')).hexdigest()
 
     @classmethod
     def _load(cls, path):
@@ -346,21 +346,20 @@ class ModuleDescriptor(namedtuple('ModuleDescriptor', ('dirPath', 'name', 'fromV
     >>> import subprocess, tempfile, os
     >>> dirPath = tempfile.mkdtemp()
     >>> path = os.path.join( dirPath, 'foo.py' )
-    >>> with open(path,'w') as f:
-    ...     f.write('from toil.resource import ModuleDescriptor\\n'
-    ...             'print ModuleDescriptor.forModule(__name__)')
-    >>> subprocess.check_output([ sys.executable, path ]) # doctest: +ELLIPSIS
-    "ModuleDescriptor(dirPath='...', name='foo', fromVirtualEnv=False)\\n"
+    >>> with open(path,'w') as f: 
+    ...     _ = f.write('from toil.resource import ModuleDescriptor\\n'
+    ...                 'print(ModuleDescriptor.forModule(__name__))')
+    >>> subprocess.check_output([ sys.executable, path ]) # doctest: +ELLIPSIS +ALLOW_BYTES
+    b"ModuleDescriptor(dirPath='...', name='foo', fromVirtualEnv=False)\\n"
 
-    Now test a collision. As funny as it sounds, the robotparser module is included in the Python
-    standard library.
+    Now test a collision. 'collections' is part of the standard library in Python 2 and 3.
     >>> dirPath = tempfile.mkdtemp()
-    >>> path = os.path.join( dirPath, 'robotparser.py' )
+    >>> path = os.path.join( dirPath, 'collections.py' )
     >>> with open(path,'w') as f:
-    ...     f.write('from toil.resource import ModuleDescriptor\\n'
-    ...             'ModuleDescriptor.forModule(__name__)')
+    ...     _ = f.write('from toil.resource import ModuleDescriptor\\n'
+    ...                 'ModuleDescriptor.forModule(__name__)')
 
-    This should fail and return exit status 1 due to the collision with the built-in 'test' module:
+    This should fail and return exit status 1 due to the collision with the built-in module:
     >>> subprocess.call([ sys.executable, path ])
     1
 

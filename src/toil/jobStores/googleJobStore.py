@@ -30,7 +30,7 @@ try:
 except ImportError:
     import pickle
 
-from bd2k.util.retry import retry
+from toil.lib.retry import retry
 from google.cloud import storage, exceptions
 from google.api_core.exceptions import GoogleAPICallError, InternalServerError, ServiceUnavailable
 from toil.lib.misc import truncExpBackoff
@@ -155,7 +155,7 @@ class GoogleJobStore(AbstractJobStore):
             self.bucket.delete(force=True)
             # throws ValueError if bucket has more than 256 objects. Then we must delete manually
         except ValueError:
-            self.bucket.delete_blobs(self.bucket.list_blobs)
+            self.bucket.delete_blobs(self.bucket.list_blobs())
             self.bucket.delete()
             # if ^ throws a google.cloud.exceptions.Conflict, then we should have a deletion retry mechanism.
 
@@ -292,6 +292,10 @@ class GoogleJobStore(AbstractJobStore):
         """
         bucketName = url.netloc
         fileName = url.path
+
+        # remove leading '/', which can cause problems if fileName is a path
+        if fileName.startswith('/'):
+            fileName = fileName[1:]
 
         storageClient = storage.Client()
         bucket = storageClient.get_bucket(bucketName)

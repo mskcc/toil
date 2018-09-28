@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
 import logging
 import os
 import subprocess
@@ -25,9 +24,9 @@ class AnsibleDriver(AbstractProvisioner):
     """
     Wrapper class for Ansible calls.
     """
-    def __init__(self, playbooks, config=None):
+    def __init__(self, playbooks, clusterName, zone, nodeStorage):
         self.playbooks = playbooks
-        super(AnsibleDriver, self).__init__(config)
+        super(AnsibleDriver, self).__init__(clusterName, zone, nodeStorage)
 
     def callPlaybook(self, playbook, ansibleArgs, wait=True, tags=["all"]):
         """
@@ -44,11 +43,11 @@ class AnsibleDriver(AbstractProvisioner):
         command.append(" ".join(["=".join(i) for i in ansibleArgs.items()]))  # Arguments being passed to playbook
         command.append(playbook)
 
-        logger.info("Executing Ansible call `%s`", " ".join(command))
+        logger.debug("Executing Ansible call `%s`", " ".join(command))
         p = subprocess.Popen(command)
         if wait:
             p.communicate()
             if p.returncode != 0:
                 # FIXME: parse error codes
-                logger.error("Ansible reported an error when executing playbook %s" % playbook)
+                raise RuntimeError("Ansible reported an error when executing playbook %s" % playbook)
 

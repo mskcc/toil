@@ -39,7 +39,7 @@ from six import iteritems, itervalues
 
 import mesos.interface
 import mesos.native
-from bd2k.util import strict_bool
+from toil.lib.memoize import strict_bool
 from mesos.interface import mesos_pb2
 
 from toil import resolveEntryPoint
@@ -471,7 +471,11 @@ class MesosBatchSystem(BatchSystemLocalSupport,
 
     def _trackOfferedNodes(self, offers):
         for offer in offers:
-            nodeAddress = socket.gethostbyname(offer.hostname)
+            try:
+                nodeAddress = socket.gethostbyname(offer.hostname)
+            except:
+                log.deug("Failed to resolve hostname %s" % offer.hostname)
+                raise
             self._registerNode(nodeAddress, offer.slave_id.value)
             preemptable = False
             for attribute in offer.attributes:

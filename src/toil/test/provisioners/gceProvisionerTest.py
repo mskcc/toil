@@ -11,9 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from builtins import next
 from builtins import str
-from builtins import range
 import logging
 import os
 from toil import subprocess
@@ -178,7 +176,7 @@ class GCEAutoscaleTest(AbstractGCEAutoscaleTest):
 
     def __init__(self, name):
         super(GCEAutoscaleTest, self).__init__(name)
-        self.clusterName = 'provisioner-test-' + bytes(uuid4())
+        self.clusterName = 'provisioner-test-' + str(uuid4())
         self.requestedLeaderStorage = 80
 
     def setUp(self):
@@ -266,7 +264,7 @@ class GCEAutoscaleTestMultipleNodeTypes(AbstractGCEAutoscaleTest):
 
     def __init__(self, name):
         super(GCEAutoscaleTestMultipleNodeTypes, self).__init__(name)
-        self.clusterName = 'provisioner-test-' + bytes(uuid4())
+        self.clusterName = 'provisioner-test-' + str(uuid4())
 
     def setUp(self):
         super(GCEAutoscaleTestMultipleNodeTypes, self).setUp()
@@ -305,7 +303,7 @@ class GCERestartTest(AbstractGCEAutoscaleTest):
 
     def __init__(self, name):
         super(GCERestartTest, self).__init__(name)
-        self.clusterName = 'restart-test-' + bytes(uuid4())
+        self.clusterName = 'restart-test-' + str(uuid4())
 
     def setUp(self):
         super(GCERestartTest, self).setUp()

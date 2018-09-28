@@ -20,15 +20,15 @@ from builtins import zip
 from builtins import map
 from builtins import str
 from builtins import object
+from builtins import super
 import collections
 import importlib
 import inspect
 import logging
 import os
-import sys
 import time
-import uuid
 import dill
+import tempfile
 
 try:
     import cPickle as pickle
@@ -43,10 +43,10 @@ from io import BytesIO
 # Python 3 compatibility imports
 from six import iteritems, string_types
 
-from bd2k.util.expando import Expando
-from bd2k.util.humanize import human2bytes
+from toil.lib.expando import Expando
+from toil.lib.humanize import human2bytes
 
-from toil.common import Toil, addOptions
+from toil.common import Toil, addOptions, safeUnpickleFromStream
 from toil.fileStore import DeferredFunction
 from toil.lib.bioio import (setLoggingFromOptions,
                             getTotalCpuTimeAndMemoryUsage,
@@ -57,9 +57,10 @@ from future.utils import with_metaclass
 logger = logging.getLogger( __name__ )
 
 
-class JobLikeObject(object):
+class BaseJob(object):
     """
-    Inherit from this class to add requirement properties to a job (or job-like) object.
+    Inherit from this class to add job properties to an object.
+
     If the object doesn't specify explicit requirements, these properties will fall back
     to the configured defaults. If the value cannot be determined, an AttributeError is raised.
     """
@@ -68,13 +69,13 @@ class JobLikeObject(object):
         memory = requirements.get('memory')
         disk = requirements.get('disk')
         preemptable = requirements.get('preemptable')
-        if unitName is not None:
+        if unitName:
             assert isinstance(unitName, (str, bytes))
-        if jobName is not None:
+        if jobName:
             assert isinstance(jobName, (str, bytes))
         self.unitName = unitName
-        self.displayName = displayName if displayName is not None else self.__class__.__name__
-        self.jobName = jobName if jobName is not None else self.__class__.__name__
+        self.displayName = displayName if displayName else self.__class__.__name__
+        self.jobName = jobName if jobName else self.__class__.__name__
         self._cores = self._parseResource('cores', cores)
         self._memory = self._parseResource('memory', memory)
         self._disk = self._parseResource('disk', disk)
@@ -147,9 +148,7 @@ class JobLikeObject(object):
         corresponding integral value will be returned.
 
         :param str name: The name of the resource
-
         :param None|str|float|int value: The resource value
-
         :rtype: int|float|None
 
         >>> Job._parseResource('cores', None)
@@ -161,11 +160,11 @@ class JobLikeObject(object):
         (1073741824, 1073741824, 1073741824)
         >>> Job._parseResource('cores', 1.1)
         1.1
-        >>> Job._parseResource('disk', 1.1)
+        >>> Job._parseResource('disk', 1.1) # doctest: +IGNORE_EXCEPTION_DETAIL
         Traceback (most recent call last):
         ...
         TypeError: The 'disk' requirement does not accept values that are of <type 'float'>
-        >>> Job._parseResource('memory', object())
+        >>> Job._parseResource('memory', object()) # doctest: +IGNORE_EXCEPTION_DETAIL
         Traceback (most recent call last):
         ...
         TypeError: The 'memory' requirement does not accept values that are of ...
@@ -192,19 +191,19 @@ class JobLikeObject(object):
         return printedName
 
 
-class JobNode(JobLikeObject):
+class JobNode(BaseJob):
     """
     This object bridges the job graph, job, and batchsystem classes
     """
     def __init__(self, requirements, jobName, unitName, jobStoreID,
                  command, displayName=None, predecessorNumber=1):
-        super(JobNode, self).__init__(requirements=requirements, displayName=displayName, unitName=unitName, jobName=jobName)
+        super().__init__(requirements=requirements, displayName=displayName, unitName=unitName, jobName=jobName)
         self.jobStoreID = jobStoreID
         self.predecessorNumber = predecessorNumber
         self.command = command
 
     def __str__(self):
-        return super(JobNode, self).__str__() + ' ' + self.jobStoreID
+        return super().__str__() + ' ' + self.jobStoreID
 
     def __hash__(self):
         return hash(self.jobStoreID)
@@ -257,7 +256,7 @@ class JobNode(JobLikeObject):
                    displayName=job.displayName,
                    predecessorNumber=predecessorNumber)
 
-class Job(JobLikeObject):
+class Job(BaseJob):
     """
     Class represents a unit of work in toil.
     """
@@ -274,15 +273,15 @@ class Job(JobLikeObject):
             exhausting all their retries, remove any successor jobs and rerun this job to restart the
             subtree. Job must be a leaf vertex in the job graph when initially defined, see
             :func:`toil.job.Job.checkNewCheckpointsAreCutVertices`.
-        :type cores: int or string convertable by bd2k.util.humanize.human2bytes to an int
-        :type disk: int or string convertable by bd2k.util.humanize.human2bytes to an int
+        :type cores: int or string convertable by toil.lib.humanize.human2bytes to an int
+        :type disk: int or string convertable by toil.lib.humanize.human2bytes to an int
         :type preemptable: bool
-        :type cache: int or string convertable by bd2k.util.humanize.human2bytes to an int
-        :type memory: int or string convertable by bd2k.util.humanize.human2bytes to an int
+        :type cache: int or string convertable by toil.lib.humanize.human2bytes to an int
+        :type memory: int or string convertable by toil.lib.humanize.human2bytes to an int
         """
         requirements = {'memory': memory, 'cores': cores, 'disk': disk,
                         'preemptable': preemptable}
-        super(Job, self).__init__(requirements=requirements, unitName=unitName, displayName=displayName)
+        super().__init__(requirements=requirements, unitName=unitName, displayName=displayName)
         self.checkpoint = checkpoint
         self.displayName = displayName if displayName is not None else self.__class__.__name__
 
@@ -358,6 +357,16 @@ class Job(JobLikeObject):
         self._followOns.append(followOnJob)
         followOnJob._addPredecessor(self)
         return followOnJob
+
+    def hasFollowOn(self, followOnJob):
+        """
+        Check if given job is already a follow-on of this job.
+
+        :param toil.job.Job followOnJob:
+        :return: True if the followOnJob is a follow-on of this job, else False.
+        :rtype: bool
+        """
+        return followOnJob in self._followOns
 
     def addService(self, service, parentService=None):
         """
@@ -777,7 +786,7 @@ class Job(JobLikeObject):
                 else:
                     return toil.restart()
 
-    class Service(with_metaclass(ABCMeta, JobLikeObject)):
+    class Service(with_metaclass(ABCMeta, BaseJob)):
         """
         Abstract class used to define the interface to a service.
         """
@@ -788,7 +797,7 @@ class Job(JobLikeObject):
             """
             requirements = {'memory': memory, 'cores': cores, 'disk': disk,
                             'preemptable': preemptable}
-            super(Job.Service, self).__init__(requirements=requirements, unitName=unitName)
+            super().__init__(requirements=requirements, unitName=unitName)
             self._childServices = []
             self._hasParent = False
 
@@ -898,13 +907,14 @@ class Job(JobLikeObject):
         logger.debug('Loading user module %s.', userModule)
         userModule = cls._loadUserModule(userModule)
         pickleFile = commandTokens[1]
-        if pickleFile == "firstJob":
-            openFileStream = jobStore.readSharedFileStream(pickleFile)
-        else:
-            openFileStream = jobStore.readFileStream(pickleFile)
-        with openFileStream as fileHandle:
-            return cls._unpickle(userModule, fileHandle, jobStore.config)
-
+        with tempfile.NamedTemporaryFile() as f:
+            filename = f.name
+            if pickleFile == "firstJob":
+                jobStore.readSharedFile(pickleFile, filename)
+            else:
+                jobStore.readFile(pickleFile, filename)
+            with open(filename, 'rb') as fileHandle:
+                return cls._unpickle(userModule, fileHandle, jobStore.config)
 
     @classmethod
     def _unpickle(cls, userModule, fileHandle, config):
@@ -913,11 +923,10 @@ class Job(JobLikeObject):
         referencing the __main__ module from the given userModule instead.
 
         :param userModule:
-        :param fileHandle:
+        :param fileHandle: An open, binary-mode file handle.
         :returns:
         """
-        unpickler = pickle.Unpickler(fileHandle)
-
+        
         def filter_main(module_name, class_name):
             try:
                 if module_name == '__main__':
@@ -931,9 +940,23 @@ class Job(JobLikeObject):
                     logger.debug('Failed getting %s from module %s.', class_name, module_name)
                 raise
 
-        unpickler.find_global = filter_main
+        try:
+            unpickler = pickle.Unpickler(fileHandle)
+            # In Python 2 with cPickle we set "find_global"
+            unpickler.find_global = filter_main
+        except AttributeError:
+            # In Python 3 find_global isn't real and we are supposed to
+            # subclass unpickler and override find_class. We can't just replace
+            # it. But with cPickle in Pyhton 2 we can't subclass Unpickler.
+            
+            class FilteredUnpickler(pickle.Unpickler):
+                def find_class(self, module, name):
+                    return filter_main(module, name)
+                    
+            unpickler = FilteredUnpickler(fileHandle)
+            
         runnable = unpickler.load()
-        assert isinstance(runnable, JobLikeObject)
+        assert isinstance(runnable, BaseJob)
         runnable._config = config
         return runnable
 
@@ -1335,21 +1358,21 @@ class Job(JobLikeObject):
         return self.displayName
 
 
-class JobException( Exception ):
+class JobException(Exception):
     """
     General job exception.
     """
-    def __init__( self, message ):
-        super( JobException, self ).__init__( message )
+    def __init__(self, message):
+        super().__init__(message)
 
 
-class JobGraphDeadlockException( JobException ):
+class JobGraphDeadlockException(JobException):
     """
     An exception raised in the event that a workflow contains an unresolvable \
     dependency, such as a cycle. See :func:`toil.job.Job.checkJobGraphForDeadlocks`.
     """
-    def __init__( self, string ):
-        super( JobGraphDeadlockException, self ).__init__( string )
+    def __init__(self, string):
+        super().__init__(string)
 
 
 class FunctionWrappingJob(Job):
@@ -1467,7 +1490,7 @@ class PromisedRequirementFunctionWrappingJob(FunctionWrappingJob):
         self._promisedKwargs = kwargs.copy()
         # Replace resource requirements in intermediate job with small values.
         kwargs.update(dict(disk='1M', memory='32M', cores=0.1))
-        super(PromisedRequirementFunctionWrappingJob, self).__init__(userFunction, *args, **kwargs)
+        super().__init__(userFunction, *args, **kwargs)
 
     @classmethod
     def create(cls, userFunction, *args, **kwargs):
@@ -1563,7 +1586,7 @@ class EncapsulatedJob(Job):
         return self.encapsulatedJob.rv(*path)
 
     def prepareForPromiseRegistration(self, jobStore):
-        super(EncapsulatedJob, self).prepareForPromiseRegistration(jobStore)
+        super().prepareForPromiseRegistration(jobStore)
         self.encapsulatedJob.prepareForPromiseRegistration(jobStore)
 
     def getUserScript(self):
@@ -1574,7 +1597,7 @@ class ServiceJobNode(JobNode):
     def __init__(self, jobStoreID, memory, cores, disk, preemptable, startJobStoreID, terminateJobStoreID,
                  errorJobStoreID, unitName, jobName, command, predecessorNumber):
         requirements = dict(memory=memory, cores=cores, disk=disk, preemptable=preemptable)
-        super(ServiceJobNode, self).__init__(unitName=unitName, jobName=jobName,
+        super().__init__(unitName=unitName, jobName=jobName,
                                              requirements=requirements,
                                              jobStoreID=jobStoreID,
                                              command=command,
@@ -1733,7 +1756,7 @@ class Promise(object):
         assert len(args) == 2
         if isinstance(args[0], Job):
             # Regular instantiation when promise is created, before it is being pickled
-            return super(Promise, cls).__new__(cls, *args)
+            return super().__new__(cls)
         else:
             # Attempted instantiation during unpickling, return promised value instead
             return cls._resolve(*args)
@@ -1748,7 +1771,7 @@ class Promise(object):
         with cls._jobstore.readFileStream(jobStoreFileID) as fileHandle:
             # If this doesn't work then the file containing the promise may not exist or be
             # corrupted
-            value = pickle.load(fileHandle)
+            value = safeUnpickleFromStream(fileHandle)
             return value
 
 
@@ -1801,15 +1824,13 @@ class PromisedRequirement(object):
         :param kwargs: function keyword arguments
         :return: bool
         """
-        requirements = ["disk", "memory", "cores"]
-        foundPromisedRequirement = False
-        for r in requirements:
+        for r in ["disk", "memory", "cores"]:
             if isinstance(kwargs.get(r), Promise):
                 kwargs[r] = PromisedRequirement(kwargs[r])
-                foundPromisedRequirement = True
+                return True
             elif isinstance(kwargs.get(r), PromisedRequirement):
-                foundPromisedRequirement = True
-        return foundPromisedRequirement
+                return True
+        return False
 
 
 class UnfulfilledPromiseSentinel(object):

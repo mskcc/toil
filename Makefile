@@ -1,4 +1,4 @@
-# Copyright (C) 2015 UCSC Computational Genomics Lab
+# Copyright (C) 2015-2018 UCSC Computational Genomics Lab
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,10 +23,10 @@ The 'prepare' target installs Toil's build requirements into the current virtual
 The 'develop' target creates an editable install of Toil and its runtime requirements in the
 current virtualenv. The install is called 'editable' because changes to the source code
 immediately affect the virtualenv. Set the 'extras' variable to ensure that the 'develop' target
-installs support for extras. Consult setup.py for the list of supported extras. To install Toil
-in develop mode with all extras, run
+installs support for extras; some tests require extras to be installed. Consult setup.py for the
+list of supported extras. To install Toil in develop mode with all extras, run
 
-	make develop extras=[mesos,aws,google,azure,cwl,encryption]
+	make develop extras=[all]
 
 The 'sdist' target creates a source distribution of Toil. It is used for some unit tests and for
 installing the currently checked out version of Toil into the appliance image.
@@ -37,6 +37,9 @@ uploaded to PyPI.
 
 The 'docs' target uses Sphinx to create HTML documentation in the docs/_build directory
 
+Targets are provided to run Toil's tests. Note that these targets do *not* automatically install
+Toil's dependencies; it is recommended to 'make develop' before running any of them.
+
 The 'test' target runs Toil's unit tests serially with pytest. It will run some docker tests and
 setup. If you wish to avoid this, use the 'test_offline' target instead. Note: this target does not
 capture output from the terminal. For any of the test targets, set the 'tests' variable to run a
@@ -45,7 +48,9 @@ particular test, e.g.
 	make test tests=src/toil/test/sort/sortTest.py::SortTest::testSort
 
 The 'test_offline' target is similar to 'test' but it skips the docker dependent tests and their
-setup.
+setup. It can also be used to invoke individual tests, e.g.
+
+    make test_offline tests_local=src/toil/test/sort/sortTest.py::SortTest::testSort
 
 The 'integration_test_local' target runs toil's integration tests. These are more thorough but also
 more costly than the regular unit tests. For the AWS integration tests to run, the environment
@@ -99,19 +104,13 @@ sdist_name:=toil-$(dist_version).tar.gz
 docker_tag:=$(shell $(python) version_template.py dockerTag)
 default_docker_registry:=$(shell $(python) version_template.py dockerRegistry)
 docker_path:=$(strip $(shell which docker))
-ifdef docker_path
-    ifdef docker_registry
-        export TOIL_DOCKER_REGISTRY?=$(docker_registry)
-    else
-        export TOIL_DOCKER_REGISTRY?=$(default_docker_registry)
-    endif
+
+ifdef docker_registry
+    export TOIL_DOCKER_REGISTRY?=$(docker_registry)
 else
-    $(warning Cannot find 'docker' executable. Docker-related targets will be skipped.)
-    export TOIL_DOCKER_REGISTRY:=
+    export TOIL_DOCKER_REGISTRY?=$(default_docker_registry)
 endif
 export TOIL_DOCKER_NAME?=$(shell $(python) version_template.py dockerName)
-# Note that setting TOIL_DOCKER_REGISTRY to an empty string yields an invalid TOIL_APPLIANCE_SELF
-# which will coax the @needs_appliance decorator to skip the test.
 export TOIL_APPLIANCE_SELF:=$(TOIL_DOCKER_REGISTRY)/$(TOIL_DOCKER_NAME):$(docker_tag)
 
 ifndef BUILD_NUMBER
@@ -120,7 +119,6 @@ normal=\033[0m
 red=\033[0;31m
 cyan=\033[0;36m
 endif
-
 
 develop: check_venv
 	$(pip) install -e .$(extras)
@@ -269,13 +267,12 @@ check_build_reqs:
 
 
 prepare: check_venv
-	$(pip) install sphinx==1.5.5 mock==1.0.1 pytest==2.8.3 stubserver==1.0.1 \
-		pytest-timeout==1.2.0
+	$(pip) install sphinx==1.5.5 mock==1.0.1 pytest==3.6.2 stubserver==1.0.1 \
+		pytest-timeout==1.2.0 cwltest
 
 
 check_venv:
-
-	@$(python) -c 'import sys; sys.exit( int( not (hasattr(sys, "real_prefix") or ( hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix ) ) ) )' \
+	@$(python) -c 'import sys, os; sys.exit( int( 0 if "VIRTUAL_ENV" in os.environ else 1 ) )' \
 		|| ( printf "$(red)A virtualenv must be active.$(normal)\n" ; false )
 
 
@@ -303,10 +300,12 @@ check_docker_registry:
 	$(default_docker_registry) and ensure that you have permissions to push \
 	to that registry. Only CI builds should push to $(default_docker_registry).$(normal)\n' ; false )
 
+
 check_cpickle:
 	# fail if cPickle.dump(s) called without HIGHEST_PROTOCOL
 	# https://github.com/BD2KGenomics/toil/issues/1503
 	! find src -iname '*.py' | xargs grep 'cPickle.dump' | grep --invert-match HIGHEST_PROTOCOL
+
 
 .PHONY: help \
 		prepare \
@@ -323,4 +322,3 @@ check_cpickle:
 		check_running_on_jenkins \
 		check_build_reqs \
 		docker clean_docker push_docker
-

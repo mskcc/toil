@@ -18,10 +18,9 @@
 # For an overview of how this all works, see discussion in
 # docs/architecture.rst
 
-from builtins import str
 from builtins import range
 from builtins import object
-from toil.job import Job
+from toil.job import Job, Promise
 from toil.common import Config, Toil, addOptions
 from toil.version import baseVersion
 
@@ -43,8 +42,9 @@ from cwltool.process import (shortname, fillInDefaults, compute_checksums,
                              collectFilesAndDirs)
 from cwltool.software_requirements import (
         DependenciesConfiguration, get_container_from_software_requirements)
-from cwltool.utils import aslist
+from cwltool.utils import aslist, add_sizes
 import schema_salad.validate as validate
+from ruamel.yaml.comments import CommentedSeq
 import schema_salad.ref_resolver
 import os
 import tempfile
@@ -64,7 +64,7 @@ import six.moves.urllib.parse as urlparse
 cwllogger = logging.getLogger("cwltool")
 
 # Define internal jobs we should avoid submitting to batch systems and logging
-CWL_INTERNAL_JOBS = ("CWLJob", "CWLJobWrapper", "CWLWorkflow", "CWLScatter", "CWLGather",
+CWL_INTERNAL_JOBS = ("CWLJobWrapper", "CWLWorkflow", "CWLScatter", "CWLGather",
                      "ResolveIndirect")
 
 # The job object passed into CWLJob and CWLWorkflow
@@ -133,6 +133,19 @@ class StepValueFrom(object):
                                           None, None, {}, context=ctx)
 
 
+class DefaultWithSource(object):
+    """A workflow step input that has both a source and a default value."""
+    def __init__(self, default, source):
+        self.default = default
+        self.source = source
+
+    def resolve(self):
+        if self.source:
+            result = self.source[1][self.source[0]]
+            if result:
+                return result
+        return self.default
+
 def _resolve_indirect_inner(d):
     """Resolve the contents an indirect dictionary (containing promises) to produce
     a dictionary actual values, including merging multiple sources into a
@@ -143,7 +156,7 @@ def _resolve_indirect_inner(d):
     if isinstance(d, IndirectDict):
         r = {}
         for k, v in list(d.items()):
-            if isinstance(v, MergeInputs):
+            if isinstance(v, (MergeInputs, DefaultWithSource)):
                 r[k] = v.resolve()
             else:
                 r[k] = v[1].get(v[0])
@@ -345,7 +358,7 @@ class ResolveIndirect(Job):
         return resolve_indirect(self.cwljob)
 
 
-def toilStageFiles(fileStore, cwljob, outdir, index, existing, export):
+def toilStageFiles(fileStore, cwljob, outdir, index, existing, export, destBucket=None):
     """Copy input files out of the global file store and update location and
     path."""
 
@@ -355,6 +368,21 @@ def toilStageFiles(fileStore, cwljob, outdir, index, existing, export):
     for f, p in pm.items():
         if not p.staged:
             continue
+
+        # Deal with bucket exports
+        if destBucket:
+            # Directories don't need to be created if we're exporting to
+            # a bucket
+            if p.type == "File":
+                # Remove the staging directory from the filepath and
+                # form the destination URL
+                unstageTargetPath = p.target[len(outdir):]
+                destUrl = '/'.join(s.strip('/') for s in [destBucket, unstageTargetPath])
+
+                fileStore.exportFile(p.resolved[7:], destUrl)
+
+            continue
+
         if not os.path.exists(os.path.dirname(p.target)):
             os.makedirs(os.path.dirname(p.target), 0o0755)
         if p.type == "File":
@@ -390,12 +418,10 @@ class CWLJobWrapper(Job):
 
     def run(self, fileStore):
         cwljob = resolve_indirect(self.cwljob)
+        fillInDefaults(self.cwltool.tool['inputs'], cwljob)
         options = copy.deepcopy(self.kwargs)
         options['jobobj'] = cwljob
         realjob = CWLJob(self.cwltool, cwljob, **options)
-        for child in self._children:
-            cwllogger.debug("CWLJobWrapper child: {}".format(child))
-            realjob.addFollowOn(child)
         self.addChild(realjob)
         return realjob.rv()
 
@@ -404,25 +430,25 @@ class CWLJob(Job):
     """Execute a CWL tool using cwltool.main.single_job_executor"""
 
     def __init__(self, tool, cwljob, **kwargs):
+        self.cwltool = remove_pickle_problems(tool)
         if 'builder' in kwargs:
             builder = kwargs["builder"]
         else:
             builder = cwltool.builder.Builder()
             builder.job = cwljob
-            builder.requirements = []
+            builder.requirements = self.cwltool.requirements
             builder.outdir = None
             builder.tmpdir = None
             builder.timeout = kwargs.get('eval_timeout')
             builder.resources = {}
         req = tool.evalResources(builder, {})
-        self.cwltool = remove_pickle_problems(tool)
         # pass the default of None if basecommand is empty
         unitName = self.cwltool.tool.get("baseCommand", None)
         if isinstance(unitName, (list, tuple)):
             unitName = ' '.join(unitName)
         super(CWLJob, self).__init__(cores=req["cores"],
-                                     memory=(req["ram"]*(2**20)),
-                                     disk=((req["tmpdirSize"]*(2**20)) + (req["outdirSize"]*(2**20))),
+                                     memory=int(req["ram"]*(2**20)),
+                                     disk=int((req["tmpdirSize"]*(2**20)) + (req["outdirSize"]*(2**20))),
                                      unitName=unitName)
 
         self.cwljob = cwljob
@@ -452,8 +478,7 @@ class CWLJob(Job):
             'tmp_outdir_prefix': tmp_outdir_prefix,
             'tmpdir_prefix': fileStore.getLocalTempDir(),
             'make_fs_access': functools.partial(ToilFsAccess, fileStore=fileStore),
-            'toil_get_file': functools.partial(toilGetFile, fileStore, index, existing),
-            'no_match_user': False})
+            'toil_get_file': functools.partial(toilGetFile, fileStore, index, existing)})
         del opts['job_order']
 
         time.sleep(20)
@@ -744,11 +769,25 @@ class CWLWorkflow(Job):
                                         raise validate.ValidationException(
                                             "Unsupported linkMerge '%s'", linkMerge)
                                 else:
-                                    jobobj[key] = (shortname(inp["source"]),
-                                                   promises[inp["source"]].rv())
-                            elif "default" in inp:
-                                d = copy.copy(inp["default"])
-                                jobobj[key] = ("default", {"default": d})
+                                    inputSource = inp["source"]
+                                    if isinstance(inputSource, CommentedSeq):
+                                        # It seems that an input source with a '#' in the name will be
+                                        # returned as a CommentedSeq list by the yaml parser.
+                                        inputSource = str(inputSource[0])
+                                    jobobj[key] = (shortname(inputSource),
+                                                   promises[inputSource].rv())
+                            if "default" in inp:
+                                if key in jobobj:
+                                    if isinstance(jobobj[key][1], Promise):
+                                        d = copy.copy(inp["default"])
+                                        jobobj[key] = DefaultWithSource(d, jobobj[key])
+                                    else:
+                                        if jobobj[key][1][jobobj[key][0]] is None:
+                                            d = copy.copy(inp["default"])
+                                            jobobj[key] = ("default", {"default": d})
+                                else:
+                                    d = copy.copy(inp["default"])
+                                    jobobj[key] = ("default", {"default": d})
 
                             if "valueFrom" in inp and "scatter" not in step.tool:
                                 if key in jobobj:
@@ -774,9 +813,16 @@ class CWLWorkflow(Job):
                         connected = False
                         for inp in step.tool["inputs"]:
                             for s in aslist(inp.get("source", [])):
-                                if not promises[s].hasChild(wfjob):
-                                    promises[s].addChild(wfjob)
-                                    connected = True
+                                if (isinstance(promises[s],
+                                        (CWLJobWrapper, CWLGather)) and
+                                        not promises[s].hasFollowOn(wfjob)):
+                                        promises[s].addFollowOn(wfjob)
+                                        connected = True
+                                if (not isinstance(promises[s],
+                                        (CWLJobWrapper, CWLGather)) and
+                                        not promises[s].hasChild(wfjob)):
+                                        promises[s].addChild(wfjob)
+                                        connected = True
                         if not connected:
                             # workflow step has default inputs only, isn't connected to other jobs,
                             # so add it as child of workflow.
@@ -885,6 +931,8 @@ def main(args=None, stdout=sys.stdout):
                     metavar=("VAR1 VAR2"),
                     default=("PATH",),
                     dest="preserve_environment")
+    parser.add_argument("--destBucket", type=str,
+                        help="Specify a cloud bucket endpoint for output files.")
     # help="Dependency resolver configuration file describing how to adapt 'SoftwareRequirement' packages to current system."
     parser.add_argument("--beta-dependency-resolvers-configuration", default=None)
     # help="Defaut root directory used by dependency resolvers configuration."
@@ -899,6 +947,10 @@ def main(args=None, stdout=sys.stdout):
     parser.add_argument("--tmp-outdir-prefix", type=Text,
                         help="Path prefix for intermediate output directories",
                         default="tmp")
+    parser.add_argument("--force-docker-pull", action="store_true", default=False, dest="force_docker_pull",
+                        help="Pull latest docker image even if it is locally present")
+    parser.add_argument("--no-match-user", action="store_true", default=False,
+                        help="Disable passing the current uid to `docker run --user`")
 
     # mkdtemp actually creates the directory, but
     # toil requires that the directory not exist,
@@ -973,6 +1025,7 @@ def main(args=None, stdout=sys.stdout):
 
             def importFiles(tool):
                 visit_class(tool, ("File", "Directory"), pathToLoc)
+                visit_class(tool, ("File", ), add_sizes)
                 normalizeFilesDirs(tool)
                 adjustDirObjs(tool, functools.partial(get_listing,
                                                       cwltool.stdfsaccess.StdFsAccess(""),
@@ -1003,10 +1056,13 @@ def main(args=None, stdout=sys.stdout):
 
             try:
                 make_opts = copy.deepcopy(vars(options))
-                make_opts.update({'tool': t, 'jobobj': {},
-                    'use_container': use_container,
-                    'tmpdir': os.path.realpath(outdir),
-                    'job_script_provider': job_script_provider})
+                make_opts.update({'tool': t,
+                                  'jobobj': {},
+                                  'use_container': use_container,
+                                  'tmpdir': os.path.realpath(outdir),
+                                  'job_script_provider': job_script_provider,
+                                  'force_docker_pull': options.force_docker_pull,
+                                  'no_match_user': options.no_match_user})
 
                 (wf1, wf2) = makeJob(**make_opts)
             except cwltool.process.UnsupportedRequirement as e:
@@ -1018,9 +1074,20 @@ def main(args=None, stdout=sys.stdout):
 
         outobj = resolve_indirect(outobj)
 
-        toilStageFiles(toil, outobj, outdir, fileindex, existing, True)
+        # Stage files. Specify destination bucket if specified in CLI
+        # options. If destination bucket not passed in,
+        # options.destBucket's value will be None.
+        toilStageFiles(
+            toil,
+            outobj,
+            outdir,
+            fileindex,
+            existing,
+            export=True,
+            destBucket=options.destBucket)
 
-        visit_class(outobj, ("File",), functools.partial(compute_checksums, cwltool.stdfsaccess.StdFsAccess("")))
+        if not options.destBucket:
+            visit_class(outobj, ("File",), functools.partial(compute_checksums, cwltool.stdfsaccess.StdFsAccess("")))
 
         stdout.write(json.dumps(outobj, indent=4))
 

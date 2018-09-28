@@ -32,6 +32,7 @@ from toil.test import (ToilTest, needs_cwl, slow, needs_docker, needs_lsf,
                        needs_torque)
 
 
+
 @needs_cwl
 class CWLTest(ToilTest):
 
@@ -64,6 +65,20 @@ class CWLTest(ToilTest):
     def test_run_revsort(self):
         outDir = self._createTempDir()
         self._tester('src/toil/test/cwl/revsort.cwl',
+                     'src/toil/test/cwl/revsort-job.json',
+                     outDir, {
+            # Having unicode string literals isn't necessary for the assertion but makes for a
+            # less noisy diff in case the assertion fails.
+            u'output': {
+                u'location': "file://" + str(os.path.join(outDir, 'output.txt')),
+                u'basename': str("output.txt"),
+                u'size': 1111,
+                u'class': u'File',
+                u'checksum': u'sha1$b9214658cc453331b62c2282b772a5c063dbd284'}})
+
+    def test_run_revsort2(self):
+        outDir = self._createTempDir()
+        self._tester('src/toil/test/cwl/revsort2.cwl',
                      'src/toil/test/cwl/revsort-job.json',
                      outDir, {
             # Having unicode string literals isn't necessary for the assertion but makes for a
@@ -124,11 +139,13 @@ class CWLTest(ToilTest):
             pass
 
     @slow
-    @pytest.mark.timeout(1200)
+    @pytest.mark.timeout(1800)
     def test_run_conformance(self, batchSystem=None):
         rootDir = self._projectRootPath()
         cwlSpec = os.path.join(rootDir, 'src/toil/test/cwl/spec')
-        testhash = "91f108df4d4ca567e567fc65f61feb0674467a84"
+        workDir = os.path.join(cwlSpec, 'v1.0')
+        # The latest cwl git hash. Update it to get the latest tests.
+        testhash = "f96bca6911b6688ff614c02dbefe819bed260a13"
         url = "https://github.com/common-workflow-language/common-workflow-language/archive/%s.zip" % testhash
         if not os.path.exists(cwlSpec):
             urlretrieve(url, "spec.zip")
@@ -137,11 +154,11 @@ class CWLTest(ToilTest):
             shutil.move("common-workflow-language-%s" % testhash, cwlSpec)
             os.remove("spec.zip")
         try:
-            cmd = ["bash", "run_test.sh", "RUNNER=toil-cwl-runner",
-                   "DRAFT=v1.0", "-j4"]
+            cmd = ['cwltest', '--tool', 'toil-cwl-runner', '--test=conformance_test_v1.0.yaml',
+                   '--timeout=1800', '--basedir=' + workDir]
             if batchSystem:
                 cmd.extend(["--batchSystem", batchSystem])
-            subprocess.check_output(cmd, cwd=cwlSpec, stderr=subprocess.STDOUT)
+            subprocess.check_output(cmd, cwd=workDir, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as e:
             only_unsupported = False
             # check output -- if we failed but only have unsupported features, we're okay

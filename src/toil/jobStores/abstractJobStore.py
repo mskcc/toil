@@ -18,6 +18,7 @@ standard_library.install_aliases()
 from builtins import str
 from builtins import map
 from builtins import object
+from builtins import super
 import shutil
 
 import re
@@ -31,12 +32,13 @@ from six import itervalues
 from six.moves.urllib.request import urlopen
 import six.moves.urllib.parse as urlparse
 
-from bd2k.util.retry import retry_http
+from toil.lib.retry import retry_http
 
+from toil.common import safeUnpickleFromStream
 from toil.fileStore import FileID
 from toil.job import JobException
-from bd2k.util import memoize
-from bd2k.util.objects import abstractclassmethod
+from toil.lib.memoize import memoize
+from toil.lib.objects import abstractclassmethod
 from future.utils import with_metaclass
 
 try:
@@ -54,8 +56,7 @@ class InvalidImportExportUrlException(Exception):
         """
         :param urlparse.ParseResult url:
         """
-        super(InvalidImportExportUrlException, self).__init__(
-            "The URL '%s' is invalid" % url.geturl())
+        super().__init__("The URL '%s' is invalid." % url.geturl())
 
 
 class NoSuchJobException(Exception):
@@ -64,7 +65,7 @@ class NoSuchJobException(Exception):
         """
         :param str jobStoreID: the jobStoreID that was mistakenly assumed to exist
         """
-        super(NoSuchJobException, self).__init__("The job '%s' does not exist" % jobStoreID)
+        super().__init__("The job '%s' does not exist." % jobStoreID)
 
 
 class ConcurrentFileModificationException(Exception):
@@ -74,8 +75,7 @@ class ConcurrentFileModificationException(Exception):
         :param str jobStoreFileID: the ID of the file that was modified by multiple workers
                or processes concurrently
         """
-        super(ConcurrentFileModificationException, self).__init__(
-            'Concurrent update to file %s detected.' % jobStoreFileID)
+        super().__init__('Concurrent update to file %s detected.' % jobStoreFileID)
 
 
 class NoSuchFileException(Exception):
@@ -86,25 +86,24 @@ class NoSuchFileException(Exception):
         :param str customName: optionally, an alternate name for the nonexistent file
         """
         if customName is None:
-            message = "File '%s' does not exist" % jobStoreFileID
+            message = "File '%s' does not exist." % jobStoreFileID
         else:
-            message = "File '%s' (%s) does not exist" % (customName, jobStoreFileID)
-        super(NoSuchFileException, self).__init__(message)
+            message = "File '%s' (%s) does not exist." % (customName, jobStoreFileID)
+        super().__init__(message)
 
 
 class NoSuchJobStoreException(Exception):
     """Indicates that the specified job store does not exist."""
     def __init__(self, locator):
-        super(NoSuchJobStoreException, self).__init__(
-            "The job store '%s' does not exist, so there is nothing to restart" % locator)
+        super().__init__("The job store '%s' does not exist, so there is nothing to restart." % locator)
 
 
 class JobStoreExistsException(Exception):
     """Indicates that the specified job store already exists."""
     def __init__(self, locator):
-        super(JobStoreExistsException, self).__init__(
+        super().__init__(
             "The job store '%s' already exists. Use --restart to resume the workflow, or remove "
-            "the job store with 'toil clean' to start the workflow from scratch" % locator)
+            "the job store with 'toil clean' to start the workflow from scratch." % locator)
 
 
 class AbstractJobStore(with_metaclass(ABCMeta, object)):
@@ -133,7 +132,7 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
         """
         assert config.workflowID is None
         config.workflowID = str(uuid4())
-        logger.info("The workflow ID is: '%s'" % config.workflowID)
+        logger.debug("The workflow ID is: '%s'" % config.workflowID)
         self.__config = config
         self.writeConfig()
 
@@ -153,7 +152,7 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
         :raises NoSuchJobStoreException: if the physical storage for this job store doesn't exist
         """
         with self.readSharedFileStream('config.pickle') as fileHandle:
-            config = pickle.load(fileHandle)
+            config = safeUnpickleFromStream(fileHandle)
             assert config.workflowID is not None
             self.__config = config
 
@@ -175,7 +174,7 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
         :param str rootJobStoreID: The ID of the job to set as root
         """
         with self.writeSharedFileStream(self.rootJobStoreIDFileName) as f:
-            f.write(rootJobStoreID)
+            f.write(rootJobStoreID.encode('utf-8'))
 
     def loadRootJob(self):
         """
@@ -188,7 +187,7 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
         """
         try:
             with self.readSharedFileStream(self.rootJobStoreIDFileName) as f:
-                rootJobStoreID = f.read()
+                rootJobStoreID = f.read().decode('utf-8')
         except NoSuchFileException:
             raise JobException('No job has been set as the root in this job store')
         if not self.exists(rootJobStoreID):
@@ -216,7 +215,7 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
         """
         # Parse out the return value from the root job
         with self.readSharedFileStream('rootJobReturnValue') as fH:
-            return pickle.load(fH)
+            return safeUnpickleFromStream(fH)
 
     @property
     @memoize
@@ -289,7 +288,7 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
         :param str sharedFileName: Optional name to assign to the imported file within the job store
 
         :return: The jobStoreFileId of the imported file or None if sharedFileName was given
-        :rtype: FileID or None
+        :rtype: toil.fileStore.FileID or None
         """
         # Note that the helper method _importFile is used to read from the source and write to
         # destination (which is the current job store in this case). To implement any
@@ -314,7 +313,7 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
         :param str sharedFileName: Optional name to assign to the imported file within the job store
 
         :return The jobStoreFileId of imported file or None if sharedFileName was given
-        :rtype: FileID or None
+        :rtype: toil.fileStore.FileID or None
         """
         if sharedFileName is None:
             with self.writeFileStream() as (writable, jobStoreFileID):
@@ -500,9 +499,9 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
                         assert serviceJobStoreID not in reachableFromRoot
                         reachableFromRoot.add(serviceJobStoreID)
 
-        logger.info("Checking job graph connectivity...")
+        logger.debug("Checking job graph connectivity...")
         getConnectedJobs(self.loadRootJob())
-        logger.info("%d jobs reachable from root." % len(reachableFromRoot))
+        logger.debug("%d jobs reachable from root." % len(reachableFromRoot))
 
         # Cleanup jobs that are not reachable from the root, and therefore orphaned
         jobsToDelete = [x for x in getJobs() if x.jobStoreID not in reachableFromRoot]
@@ -528,7 +527,7 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
                 # earlier checkpoint, so it and all its successors are
                 # already gone.
                 continue
-            logger.info("Restarting checkpointed job %s" % jobGraph)
+            logger.debug("Restarting checkpointed job %s" % jobGraph)
             deletedThisRound = jobGraph.restartCheckpoint(self)
             jobsDeletedByCheckpoints |= set(deletedThisRound)
         for jobID in jobsDeletedByCheckpoints:
@@ -630,7 +629,7 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
             # This cleans the old log file which may
             # have been left if the jobGraph is being retried after a jobGraph failure.
             if jobGraph.logJobStoreFileID != None:
-                self.delete(jobGraph.logJobStoreFileID)
+                self.deleteFile(jobGraph.logJobStoreFileID)
                 jobGraph.logJobStoreFileID = None
                 changed[0] = True
 
@@ -639,7 +638,7 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
                 self.update(jobGraph)
 
         # Remove any crufty stats/logging files from the previous run
-        logger.info("Discarding old statistics and logs...")
+        logger.debug("Discarding old statistics and logs...")
         # We have to manually discard the stream to avoid getting
         # stuck on a blocking write from the job store.
         def discardStream(stream):
@@ -648,7 +647,7 @@ class AbstractJobStore(with_metaclass(ABCMeta, object)):
                 pass
         self.readStatsAndLogging(discardStream)
 
-        logger.info("Job store is clean")
+        logger.debug("Job store is clean")
         # TODO: reloading of the rootJob may be redundant here
         return self.loadRootJob()
 
