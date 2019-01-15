@@ -37,23 +37,19 @@ logger = logging.getLogger( __name__ )
 
 def prepareBsub(cpu, mem, name):
     #for some reason default has 3 extra digits, just take them off beforehand for now
-    #FIXME HAX
     if len(str(mem)) >= 10:
         mem = int(mem) / 1000
     logger.debug("Calculated %s cpus requested, %s mem" % (cpu, str(mem/1000000)))
     if (name.find("CWL") > -1) or (name.find("ResolveIndirect") > -1):
-        mem=16000000
-        cpu=1
-        mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
-        cpu = '' if cpu is None else '-n ' + str(int(cpu))
-        # CWLJob takes >2hrs sometimes, so except for that, use the short queue
-        mem += '' if (name.find("CWLJob") > -1) else ' -We 0:59'
+        mem = '-R "select[mem>16] rusage[mem=16]"'
+    elif (name.find("cmo_vardict") > -1) or (name.find("ngs-filters") > -1):
+        mem = '-R "select[mem>64] rusage[mem=64]"'
     else:
-        mem = '' if mem is None else '-R "select[type==X86_64 && mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
-        cpu = '' if cpu is None else '-n ' + str(int(cpu))
+        mem = '' if mem is None else '-R "select[mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem)/1000000) + ']"'
+    cpu = '' if cpu is None else '-n ' + str(cpu)
     name = '' if name is None else '-J ' + name.replace(" ","_")
     bsubline = ["bsub", mem, cpu, name, "-cwd", ".", "-o", "/dev/null", "-e", "/dev/null"]
-    if os.environ.get('TOIL_LSF_PROJECT') != None: #then this shit is defined
+    if os.environ.get('TOIL_LSF_PROJECT') != None:
         bsubline  = bsubline + ['-P', '"' + os.environ.get('TOIL_LSF_PROJECT')+ '"']
     lsfArgs = os.getenv('TOIL_LSF_ARGS')
     if lsfArgs:
