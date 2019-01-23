@@ -47,8 +47,8 @@ def prepareBsub(cpu, mem, name):
     elif (name.find("cmo_vardict") > -1) or (name.find("ngs-filters") > -1):
         mem = '-R "select[mem>96] rusage[mem=96]"'
     else:
-        mem = '-R "select[mem>16] rusage[mem=16]"' if mem is None else '-R "select[mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem)/1000000) + ']"'
-    cpu = '' if cpu is None else '-n ' + str(cpu)
+        mem = '-R "select[mem>16] rusage[mem=16]"' if mem is None else '-R "select[mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
+    cpu = '' if cpu is None else '-n ' + str(int(cpu))
     name = '' if name is None else '-J ' + name.replace(" ","_")
     bsubline = ["bsub", mem, cpu, name, "-cwd", ".", "-o", "/dev/null", "-e", "/dev/null"]
     if os.environ.get('TOIL_LSF_PROJECT') != None:
