@@ -45,7 +45,7 @@ def prepareBsub(cpu, mem, name):
         # CWLJob takes >2hrs sometimes, so except for that, use the short queue
         mem += '' if (name.find("CWLJob") > -1) else ' -We 0:59'
     elif (name.find("cmo_vardict") > -1) or (name.find("ngs-filters") > -1):
-        mem = '-R "select[mem>64] rusage[mem=64]"'
+        mem = '-R "select[mem>96] rusage[mem=96]"'
     else:
         mem = '-R "select[mem>16] rusage[mem=16]"' if mem is None else '-R "select[mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem)/1000000) + ']"'
     cpu = '' if cpu is None else '-n ' + str(cpu)
