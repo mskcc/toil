@@ -36,7 +36,7 @@ logger = logging.getLogger( __name__ )
 
 
 def prepareBsub(cpu, mem, name):
-    #for some reason default has 3 extra digits, just take them off beforehand for now
+    # For some reason default has 3 extra digits, just take them off beforehand for now
     if len(str(mem)) >= 10:
         mem = int(mem) / 1000
     logger.debug("Calculated %s cpus requested, %s mem" % (cpu, str(mem/1000000)))
@@ -44,7 +44,7 @@ def prepareBsub(cpu, mem, name):
     if (name.find("cmo_vardict") > -1) or (name.find("ngs-filters") > -1):
         mem = '-R "select[mem>96] rusage[mem=96]"'
     # Request 16GB when Toil requests 4GB, to override unknown bug on cwltoil --restart
-    elif (int(mem) == 4000000):
+    elif (int(mem/1000000) == 4):
         mem = '-R "select[mem>16] rusage[mem=16]"'
     else:
         mem = '' if mem is None else '-R "select[mem > ' + str(int(mem)/1000000) + '] rusage[mem=' + str(int(mem/1000000)) + ']"'
