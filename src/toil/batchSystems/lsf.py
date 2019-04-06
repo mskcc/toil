@@ -41,8 +41,10 @@ def prepareBsub(cpu, mem, name):
         mem = int(mem) / 1000
     logger.debug("Calculated %s cpus requested, %s mem" % (cpu, str(mem/1000000)))
     # Some tools need more RAM depending on input, and this helps tweak ramMin without restart
-    if (name.find("cmo_vardict") > -1) or (name.find("ngs-filters") > -1):
+    if (name.find("cmo_vardict") > -1):
         mem = '-R "select[mem>96] rusage[mem=96]"'
+    elif (name.find("ngs-filters") > -1):
+        mem = '-R "select[mem>384] rusage[mem=384]"'
     # Request 16GB when Toil requests 4GB, to override unknown bug on cwltoil --restart
     elif (int(mem/1000000) == 4):
         mem = '-R "select[mem>16] rusage[mem=16]"'
