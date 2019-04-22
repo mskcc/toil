@@ -164,7 +164,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                     converted_mem = math.ceil(old_div(float(mem*1000), 1024**3))
                 mem_resource = parse_memory_resource(converted_mem)
                 mem_limit = parse_memory_limit(converted_mem)
-                bsubMem = ['-R', 'select[type==X86_64 && mem > {m}] '
+                bsubMem = ['-R', 'select[mem > {m}] '
                            'rusage[mem={m}]'.format(m=mem_resource),
                            '-M', str(mem_limit)]
             else:
