@@ -34,14 +34,14 @@ def runSetup():
     gcs = 'google-cloud-storage==1.6.0'
     gcs_oauth2_boto_plugin = 'gcs_oauth2_boto_plugin==1.14'
     apacheLibcloud = 'apache-libcloud==2.2.1'
-    cwltool = 'cwltool==1.0.20181118133959'
-    schemaSalad = 'schema-salad>=2.6, <3'
+    cwltool = 'cwltool==1.0.20190815141648'
+    schemaSalad = 'schema-salad<5,>=4.5.20190815125611'
     galaxyLib = 'galaxy-lib==18.9.2'
     htcondor = 'htcondor>=8.6.0'
     dill = 'dill==0.2.7.1'
     six = 'six>=1.10.0'
     future = 'future'
-    requests = 'requests==2.18.4'
+    requests = 'requests>=2, <3'
     docker = 'docker==2.5.1'
     subprocess32 = 'subprocess32<=3.5.2'
     dateutil = 'python-dateutil'
@@ -124,6 +124,8 @@ def runSetup():
           'Operating System :: POSIX',
           'Operating System :: POSIX :: Linux',
           'Programming Language :: Python :: 2.7',
+          'Programming Language :: Python :: 3.5',
+          'Programming Language :: Python :: 3.6',
           'Topic :: Scientific/Engineering',
           'Topic :: Scientific/Engineering :: Bio-Informatics',
           'Topic :: Scientific/Engineering :: Astronomy',

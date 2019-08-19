@@ -28,7 +28,7 @@ There are several environment variables that affect the way Toil runs.
 | TOIL_DOCKER_REGISTRY             | The URL of the registry of the Toil Appliance      |
 |                                  | image you wish to use. Docker will use Dockerhub   |
 |                                  | by default, but the quay.io registry is also       |
-|                                  | very popular and easily specifiable by settting    |
+|                                  | very popular and easily specifiable by setting     |
 |                                  | this option to ``quay.io``.                        |
 +----------------------------------+----------------------------------------------------+
 | TOIL_DOCKER_NAME                 | The name of the Toil Appliance image you           |
@@ -88,6 +88,16 @@ There are several environment variables that affect the way Toil runs.
 | TOIL_LSF_ARGS                    | Additional arguments for the LSF's bsub command.   |
 |                                  | Instead, define extra parameters for the job such  |
 |                                  | as queue. Example: -q medium.                      |
+|                                  | There is no default value for this variable.       |
++----------------------------------+----------------------------------------------------+
+| TOIL_HTCONDOR_PARAMS             | Additional parameters to include in the HTCondor   |
+|                                  | submit file passed to condor_submit. Do not pass   |
+|                                  | CPU or memory specifications here. Instead define  |
+|                                  | extra parameters which may be required by HTCondor.|
+|                                  | This variable is parsed as a semicolon-separated   |
+|                                  | string of ``parameter = value`` pairs. Example:    |
+|                                  | ``requirements = TARGET.has_sse4_2 == true;        |
+|                                  | accounting_group = test``.                         |
 |                                  | There is no default value for this variable.       |
 +----------------------------------+----------------------------------------------------+
 | TOIL_CUSTOM_DOCKER_INIT_COMMAND  | Any custom bash command to run in the Toil docker  |

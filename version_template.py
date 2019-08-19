@@ -25,9 +25,8 @@ import the expand_ function and invoke it directly with either no or exactly one
 #  - don't import at module level unless you want the imported value to be included in the output
 #  - only import from the Python standard run-time library (you can't have any dependencies)
 
-baseVersion = '3.19.0'
+baseVersion = '3.21.0'
 cgcloudVersion = '1.6.0a1.dev393'
-dockerRegistry = 'quay.io/ucsc_cgl'
 dockerName = 'toil'
 
 
@@ -112,6 +111,11 @@ def currentCommit():
     if isinstance(output, bytes):
         return output.decode('utf-8')
     return str(output)
+
+
+def dockerRegistry():
+    import os
+    return os.getenv('TOIL_DOCKER_REGISTRY', 'quay.io/ucsc_cgl')
 
 
 def dirty():

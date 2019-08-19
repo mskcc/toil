@@ -211,11 +211,10 @@ def simplify_list(maybe_list):
 
 
 class ToilPathMapper(PathMapper):
-    """ToilPathMapper keeps track of a file's symbolic identifier (the Toil
-    FileStore token), its local path on the host (the value returned by
-    readGlobalFile) and the the location of the file inside the Docker
-    container.
-
+    """
+    ToilPathMapper keeps track of a file's symbolic identifier (the Toil
+    FileID), its local path on the host (the value returned by readGlobalFile)
+    and the the location of the file inside the Docker container.
     """
 
     def __init__(self, referenced_files, basedir, stagedir,
@@ -469,40 +468,6 @@ class CWLJobWrapper(Job):
         self.addChild(realjob)
         return realjob.rv()
 
-def _makeNestedTempDir(top, seed, levels=2):
-    """
-    Gets a temporary directory in the hierarchy of directories under a given
-    top directory.
-
-    This exists to avoid placing too many temporary directories under a single
-    top in a flat structure, which can slow down metadata updates such as
-    deletes on the local file system.
-
-    The seed parameter allows for deterministic placement of the created
-    directory. The seed is hashed into hex digest and the directory structure
-    is created from the initial letters of the digest.
-
-    :param top : string, top directory for the hierarchy
-    :param seed : string, the hierarchy will be generated from this seed string
-    :rtype : string, path to temporary directory - will be created when
-        necessary.
-    """
-    # Valid chars for the creation of temporary directories
-    validDirs = hashlib.md5(six.b(str(seed))).hexdigest()
-    tempDir = top
-    for i in range(max(min(levels, len(validDirs)), 1)):
-        tempDir = os.path.join(tempDir, validDirs[i])
-        if not os.path.exists(tempDir):
-            try:
-                os.makedirs(tempDir)
-            except os.error:
-                if not os.path.exists(tempDir):
-                    # In the case that a collision occurs and
-                    # it is created while we wait then we ignore
-                    raise
-    return tempDir
-
-
 class CWLJob(Job):
     """Execute a CWL tool using cwltool.executors.SingleJobExecutor"""
 
@@ -561,7 +526,6 @@ class CWLJob(Job):
         self.runtime_context = runtime_context
         self.step_inputs = step_inputs or self.cwltool.tool["inputs"]
         self.workdir = runtime_context.workdir
-        self.openTempDirs = []
 
     def run(self, file_store):
         cwljob = resolve_indirect(self.cwljob)
@@ -578,18 +542,21 @@ class CWLJob(Job):
                 cwljob.pop(inp_id)
 
         # Exports temporary directory for batch systems that reset TMPDIR
-        os.environ["TMPDIR"] = os.path.realpath(
-            self.runtime_context.tmpdir or file_store.getLocalTempDir())
+        os.environ["TMPDIR"] = os.path.realpath(file_store.getLocalTempDir())
         outdir = os.path.join(file_store.getLocalTempDir(), "out")
         os.mkdir(outdir)
-        top_tmp_outdir = self.workdir or os.environ["TMPDIR"]
-        tmp_outdir_prefix = os.path.join(
-            _makeNestedTempDir(top=top_tmp_outdir, seed=outdir, levels=2),
-            "out_tmpdir")
-        self.openTempDirs.append(top_tmp_outdir)
+        # Just keep the temporary output prefix under the job's local temp dir,
+        # next to the outdir.
+        #
+        # If we maintain our own system of nested temp directories, we won't
+        # know when all the jobs using a higher-level directory are ready for
+        # it to be deleted. The local temp dir, under Toil's workDir, will be
+        # cleaned up by Toil.
+        tmp_outdir_prefix = os.path.join(file_store.getLocalTempDir(), "tmp-out")
 
         index = {}
         existing = {}
+        # Prepare the run instructions for cwltool
         runtime_context = self.runtime_context.copy()
         runtime_context.basedir = os.getcwd()
         runtime_context.outdir = outdir
@@ -1027,16 +994,6 @@ def visitSteps(t, op):
             op(s.tool)
             visitSteps(s.embedded_tool, op)
 
-
-def cleanTempDirs(job):
-    """Remove temporarly created directories."""
-    if job is CWLJob and job._succeeded:  # Only CWLJobs have this attribute.
-        for tempDir in job.openTempDirs:
-            if os.path.exists(tempDir):
-                shutil.rmtree(tempDir)
-        job.openTempDirs = []
-
-
 def main(args=None, stdout=sys.stdout):
     """Main method for toil-cwl-runner."""
     cwllogger.removeHandler(defaultStreamHandler)
@@ -1056,7 +1013,6 @@ def main(args=None, stdout=sys.stdout):
     parser.add_argument("--basedir", type=str)
     parser.add_argument("--outdir", type=str, default=os.getcwd())
     parser.add_argument("--version", action='version', version=baseVersion)
-
     dockergroup = parser.add_mutually_exclusive_group()
     dockergroup.add_argument(
         "--user-space-docker-cmd",
@@ -1065,12 +1021,16 @@ def main(args=None, stdout=sys.stdout):
     dockergroup.add_argument(
         "--singularity", action="store_true", default=False,
         help="[experimental] Use Singularity runtime for running containers. "
-        "Requires Singularity v2.3.2+ and Linux with kernel version v3.18+ or "
+        "Requires Singularity v2.6.1+ and Linux with kernel version v3.18+ or "
         "with overlayfs support backported.")
     dockergroup.add_argument(
         "--no-container", action="store_true", help="Do not execute jobs in a "
         "Docker container, even when `DockerRequirement` "
         "is specified under `hints`.")
+    dockergroup.add_argument(
+        "--leave-container", action="store_false", default=True,
+        help="Do not delete Docker container used by jobs after they exit",
+        dest="rm_container")
 
     parser.add_argument(
         "--preserve-environment", type=str, nargs='+',
@@ -1111,23 +1071,50 @@ def main(args=None, stdout=sys.stdout):
     parser.add_argument(
         "--no-read-only", action="store_true", default=False,
         help="Do not set root directory in the container as read-only")
+    parser.add_argument(
+        "--strict-memory-limit", action="store_true", help="When running with "
+        "software containers and the Docker engine, pass either the "
+        "calculated memory allocation from ResourceRequirements or the "
+        "default of 1 gigabyte to Docker's --memory option.")    
+    parser.add_argument(
+        "--relax-path-checks", action="store_true",
+        default=False, help="Relax requirements on path names to permit "
+        "spaces and hash characters.", dest="relax_path_checks")
 
+    if args is None:
+        args = sys.argv[1:]
+
+    # Problem: we want to keep our job store somewhere auto-generated based on
+    # our options, unless overridden by... an option. So we will need to parse
+    # options twice, because we need to feed the parser the job store.
+    
+    # Propose a local workdir, probably under /tmp.
     # mkdtemp actually creates the directory, but
     # toil requires that the directory not exist,
+    # since it is going to be our jobstore,
     # so make it and delete it and allow
     # toil to create it again (!)
     workdir = tempfile.mkdtemp()
     os.rmdir(workdir)
 
-    if args is None:
-        args = sys.argv[1:]
-
-    # we use workdir as jobStore:
+    # we use workdir as default default jobStore:
     options = parser.parse_args([workdir] + args)
 
-    # if tmpdir_prefix is not the default value, set workDir too
+    # if tmpdir_prefix is not the default value, set workDir if unset, and move
+    # workdir and the job store under it
     if options.tmpdir_prefix != 'tmp':
-        options.workDir = options.tmpdir_prefix
+        workdir = tempfile.mkdtemp(dir=options.tmpdir_prefix)
+        os.rmdir(workdir)
+        # Re-parse arguments with the new default jobstore under the temp dir.
+        # It still might be overridden by a --jobStore option
+        options = parser.parse_args([workdir] + args)
+        if options.workDir is None:
+            # We need to override workDir because by default Toil will pick
+            # somewhere under the system temp directory if unset, ignoring
+            # --tmpdir-prefix.
+            #
+            # If set, workDir needs to exist, so we directly use the prefix
+            options.workDir = options.tmpdir_prefix
 
     if options.provisioner and not options.jobStore:
         raise NoSuchJobStoreException(
@@ -1140,7 +1127,6 @@ def main(args=None, stdout=sys.stdout):
 
     outdir = os.path.abspath(options.outdir)
     tmp_outdir_prefix = os.path.abspath(options.tmp_outdir_prefix)
-    tmpdir_prefix = os.path.abspath(options.tmpdir_prefix)
 
     fileindex = {}
     existing = {}
@@ -1186,24 +1172,11 @@ def main(args=None, stdout=sys.stdout):
                 cwltool.main.load_job_order(
                     options, sys.stdin, loading_context.fetcher_constructor,
                     loading_context.overrides_list, tool_file_uri)
-            document_loader, workflowobj, uri = \
-                cwltool.load_tool.fetch_document(
-                    uri, loading_context.resolver,
-                    loading_context.fetcher_constructor)
-            document_loader, avsc_names, processobj, metadata, uri = \
-                cwltool.load_tool.validate_document(
-                    document_loader, workflowobj, uri,
-                    loading_context.overrides_list,
-                    loading_context.metadata,
-                    loading_context.enable_dev, loading_context.strict, False,
-                    loading_context.fetcher_constructor, False,
-                    do_validate=loading_context.do_validate)
-            loading_context.overrides_list.extend(
-                metadata.get("cwltool:overrides", []))
+            loading_context, workflowobj, uri = cwltool.load_tool.fetch_document(uri, loading_context)
+            loading_context, uri = cwltool.load_tool.resolve_and_validate_document(loading_context, workflowobj, uri)
+            loading_context.overrides_list.extend(loading_context.metadata.get("cwltool:overrides", []))
             try:
-                tool = cwltool.load_tool.make_tool(
-                    document_loader, avsc_names, metadata, uri,
-                    loading_context)
+                tool = cwltool.load_tool.make_tool(uri, loading_context)
             except cwltool.process.UnsupportedRequirement as err:
                 logging.error(err)
                 return 33
@@ -1235,20 +1208,17 @@ def main(args=None, stdout=sys.stdout):
 
             for inp in tool.tool["inputs"]:
                 def set_secondary(fileobj):
-                    if isinstance(fileobj, Mapping) \
-                            and fileobj.get("class") == "File":
+                    if isinstance(fileobj, Mapping) and fileobj.get("class") == "File":
                         if "secondaryFiles" not in fileobj:
-                            fileobj["secondaryFiles"] = [
-                                {"location": cwltool.builder.substitute(
-                                    fileobj["location"], sf), "class": "File"}
-                                for sf in inp["secondaryFiles"]]
+                            fileobj["secondaryFiles"] = [{"location": cwltool.builder.substitute(fileobj["location"],
+                                                         sf["pattern"]), "class": "File"}
+                                                         for sf in inp["secondaryFiles"]]
 
                     if isinstance(fileobj, MutableSequence):
                         for entry in fileobj:
                             set_secondary(entry)
 
-                if shortname(inp["id"]) in initialized_job_order \
-                        and inp.get("secondaryFiles"):
+                if shortname(inp["id"]) in initialized_job_order and inp.get("secondaryFiles"):
                     set_secondary(initialized_job_order[shortname(inp["id"])])
 
             import_files(initialized_job_order)
@@ -1256,7 +1226,6 @@ def main(args=None, stdout=sys.stdout):
 
             try:
                 runtime_context.use_container = use_container
-                runtime_context.tmpdir = os.path.realpath(tmpdir_prefix)
                 runtime_context.tmp_outdir_prefix = os.path.realpath(
                     tmp_outdir_prefix)
                 runtime_context.job_script_provider = job_script_provider
@@ -1269,8 +1238,6 @@ def main(args=None, stdout=sys.stdout):
                 return 33
 
             wf1.cwljob = initialized_job_order
-            if wf1 is CWLJob:  # Clean up temporary directories only created with CWLJobs.
-                wf1.addFollowOnFn(cleanTempDirs, wf1)
             outobj = toil.start(wf1)
 
         outobj = resolve_indirect(outobj)
