@@ -248,9 +248,9 @@ class FileJobStore(AbstractJobStore):
         # linking is not done be default because of issue #1755
         srcPath = self._extractPathFromUrl(srcURL)
         #if self.linkImports:
-        if os.path.exists(destPath):
-            os.unlink(destPath)
-        os.symlink(os.path.realpath(srcPath), destPath)
+        tmpPath = destPath + "_tmp_" + str(random.randint(1,101))
+        os.symlink(os.path.realpath(srcPath), tmpPath)
+        os.rename(tmpPath, destPath)
         #else:
         #shutil.copyfile(srcPath, destPath)
 
