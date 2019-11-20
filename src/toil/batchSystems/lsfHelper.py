@@ -122,6 +122,8 @@ def get_lsf_units(resource=False):
     check if we can find LSF_UNITS_FOR_LIMITS in lsadmin and lsf.conf
     files, preferring the value in bparams, then lsadmin, then the lsf.conf file
     """
+    # ::TODO:: Hardcode this for now, generalize later for PR to DataBiosphere
+    return "GB"
     lsf_units = apply_bparams(get_lsf_units_from_stream)
     if lsf_units:
         return lsf_units
@@ -165,6 +167,8 @@ def per_core_reservation():
     returns True if the cluster is configured for reservations to be per core,
     False if it is per job
     """
+    # ::TODO:: Hardcode for now, generalize later for PR to DataBiosphere
+    return True
     per_core = apply_bparams(per_core_reserve_from_stream)
     if per_core:
         if per_core.upper() == "Y":

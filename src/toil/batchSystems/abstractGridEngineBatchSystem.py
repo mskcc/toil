@@ -206,6 +206,8 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
 
             activity = False
             for jobID in list(self.runningJobs):
+                # Throttle status queries to avoid hammering the batch system
+                time.sleep(0.5)
                 batchJobID = self.getBatchSystemID(jobID)
                 status = with_retries(self.getJobExitCode, batchJobID)
                 if status is not None:
