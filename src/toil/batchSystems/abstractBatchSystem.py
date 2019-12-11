@@ -139,18 +139,20 @@ class AbstractBatchSystem(with_metaclass(ABCMeta, object)):
 
         :return: dictionary with currently running jobID keys and how many seconds they have
                  been running as the value
-        :rtype: dict[str,float]
+        :rtype: dict[int,float]
         """
         raise NotImplementedError()
 
     @abstractmethod
     def getUpdatedBatchJob(self, maxWait):
         """
-        Returns a job that has updated its status.
+        Returns information about job that has updated its status (i.e. ceased
+        running, either successfully or with an error). Each such job will be
+        returned exactly once.
 
         :param float maxWait: the number of seconds to block, waiting for a result
 
-        :rtype: tuple(str, int) or None
+        :rtype: tuple(str, int, float) or None
         :return: If a result is available, returns a tuple (jobID, exitValue, wallTime).
                  Otherwise it returns None. wallTime is the number of seconds (a float) in
                  wall-clock time the job ran for or None if this batch system does not support
@@ -262,10 +264,6 @@ class BatchSystemSupport(AbstractBatchSystem):
 
         If no value is provided it will be looked up from the current environment.
 
-        NB: Only the Mesos and single-machine batch systems support passing environment
-        variables. On other batch systems, this method has no effect. See
-        https://github.com/BD2KGenomics/toil/issues/547.
-
         :param str name: the environment variable to be set on the worker.
 
         :param str value: if given, the environment variable given by name will be set to this value.
@@ -322,7 +320,7 @@ class BatchSystemSupport(AbstractBatchSystem):
         if (info.cleanWorkDir == 'always'
             or info.cleanWorkDir in ('onSuccess', 'onError')
             and workflowDirContents in ([], [cacheDirName(info.workflowID)])):
-            shutil.rmtree(workflowDir)
+            shutil.rmtree(workflowDir, ignore_errors=True)
 
 
 class BatchSystemLocalSupport(BatchSystemSupport):

@@ -25,7 +25,7 @@ def runSetup():
     futures = 'futures==3.1.1'
     pycryptodome = 'pycryptodome==3.5.1'
     pymesos = 'pymesos==0.3.7'
-    psutil = 'psutil==3.0.1'
+    psutil = 'psutil >= 3.0.1, <6'
     azureCosmosdbTable = 'azure-cosmosdb-table==0.37.1'
     azureAnsible = 'ansible[azure]==2.5.0a1'
     azureStorage = 'azure-storage==0.35.1'
@@ -34,10 +34,12 @@ def runSetup():
     gcs = 'google-cloud-storage==1.6.0'
     gcs_oauth2_boto_plugin = 'gcs_oauth2_boto_plugin==1.14'
     apacheLibcloud = 'apache-libcloud==2.2.1'
-    cwltool = 'cwltool==1.0.20190815141648'
+    cwltool = 'cwltool==1.0.20190906054215'
     schemaSalad = 'schema-salad<5,>=4.5.20190815125611'
     galaxyLib = 'galaxy-lib==18.9.2'
     htcondor = 'htcondor>=8.6.0'
+    kubernetes = 'kubernetes>=10, <11'
+    pytx = 'pytz>=2012'
     dill = 'dill==0.2.7.1'
     six = 'six>=1.10.0'
     future = 'future'
@@ -62,9 +64,6 @@ def runSetup():
         sphinx,
         pathlib2]
 
-    mesos_reqs = [
-        pymesos,
-        psutil]
     aws_reqs = [
         boto,
         boto3,
@@ -75,31 +74,39 @@ def runSetup():
         secretstorage,
         azureAnsible,
         azureStorage]
+    cwl_reqs = [
+        cwltool,
+        schemaSalad,
+        galaxyLib]
     encryption_reqs = [
         pynacl]
     google_reqs = [
         gcs_oauth2_boto_plugin,  # is this being used??
         apacheLibcloud,
         gcs]
-    cwl_reqs = [
-        cwltool,
-        schemaSalad,
-        galaxyLib]
-    wdl_reqs = []
     htcondor_reqs = [
         htcondor]
+    kubernetes_reqs = [
+        kubernetes]
+    mesos_reqs = [
+        pymesos,
+        psutil]
+    wdl_reqs = []
+    
 
     # htcondor is not supported by apple
     # this is tricky to conditionally support in 'all' due
     # to how wheels work, so it is not included in all and
     # must be explicitly installed as an extra
     all_reqs = \
-        mesos_reqs + \
         aws_reqs + \
         azure_reqs + \
+        cwl_reqs + \
         encryption_reqs + \
         google_reqs + \
-        cwl_reqs
+        kubernetes_reqs + \
+        mesos_reqs
+        
 
     # remove the subprocess32 backport if not python2
     if not sys.version_info[0] == 2:
@@ -137,14 +144,15 @@ def runSetup():
         license="Apache License v2.0",
         install_requires=core_reqs,
         extras_require={
-            'mesos': mesos_reqs,
             'aws': aws_reqs,
             'azure': azure_reqs,
+            'cwl': cwl_reqs,
             'encryption': encryption_reqs,
             'google': google_reqs,
-            'cwl': cwl_reqs,
-            'wdl': wdl_reqs,
             'htcondor:sys_platform!="darwin"': htcondor_reqs,
+            'kubernetes': kubernetes_reqs,
+            'mesos': mesos_reqs,
+            'wdl': wdl_reqs,
             'all': all_reqs},
         package_dir={'': 'src'},
         packages=find_packages(where='src',
@@ -164,7 +172,8 @@ def runSetup():
                 'cwltoil = toil.cwl.cwltoil:main [cwl]',
                 'toil-cwl-runner = toil.cwl.cwltoil:main [cwl]',
                 'toil-wdl-runner = toil.wdl.toilwdl:main',
-                '_toil_mesos_executor = toil.batchSystems.mesos.executor:main [mesos]']})
+                '_toil_mesos_executor = toil.batchSystems.mesos.executor:main [mesos]',
+                '_toil_kubernetes_executor = toil.batchSystems.kubernetes:executor [kubernetes]']})
 
 
 def importVersion():

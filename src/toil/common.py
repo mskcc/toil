@@ -123,6 +123,7 @@ class Config(object):
         self.maxLogFileSize = 64000
         self.writeLogs = None
         self.writeLogsGzip = None
+        self.writeLogsFromAllJobs = False
         self.sseKey = None
         self.cseKey = None
         self.servicePollingInterval = 60
@@ -132,6 +133,7 @@ class Config(object):
 
         # Debug options
         self.debugWorker = False
+        self.disableWorkerOutputCapture = False
         self.badWorker = 0.0
         self.badWorkerFailInterval = 0.01
 
@@ -270,7 +272,13 @@ class Config(object):
         setOption("maxLogFileSize", h2b, iC(1))
         setOption("writeLogs")
         setOption("writeLogsGzip")
+        setOption("writeLogsFromAllJobs")
         setOption("runCwlInternalJobsOnWorkers")
+
+        assert not (self.writeLogs and self.writeLogsGzip), \
+            "Cannot use both --writeLogs and --writeLogsGzip at the same time."
+        assert not self.writeLogsFromAllJobs or self.writeLogs or self.writeLogsGzip, \
+            "To enable --writeLogsFromAllJobs, either --writeLogs or --writeLogsGzip must be set."
 
         def checkSse(sseKey):
             with open(sseKey) as f:
@@ -283,6 +291,7 @@ class Config(object):
 
         # Debug options
         setOption("debugWorker")
+        setOption("disableWorkerOutputCapture")
         setOption("badWorker", float, fC(0.0, 1.0))
         setOption("badWorkerFailInterval", float, fC(0.0))
 
@@ -545,13 +554,18 @@ def _addOptions(addGroupFn, config):
                      "specified path. Any non-empty standard output and error from failed batch "
                      "system jobs will also be written into files at this path. "
                      "The current working directory will be used if a path is "
-                     "not specified explicitly. Note: By default "
-                     "only the logs of failed jobs are returned to leader. Set log level to "
-                     "'debug' to get logs back from successful jobs, and adjust 'maxLogFileSize' "
-                     "to control the truncation limit for worker logs.")
+                     "not specified explicitly. Note: By default only the logs of failed jobs are "
+                     "returned to leader. Set log level to 'debug' or enable "
+                     "'--writeLogsFromAllJobs' to get logs back from successful jobs, and adjust "
+                     "'maxLogFileSize' to control the truncation limit for worker logs.")
     addOptionFn("--writeLogsGzip", dest="writeLogsGzip", nargs='?', action='store',
                 default=None, const=os.getcwd(),
                 help="Identical to --writeLogs except the logs files are gzipped on the leader.")
+    addOptionFn("--writeLogsFromAllJobs", dest="writeLogsFromAllJobs", action='store_true',
+                default=False,
+                help="Whether to write logs from all jobs (including the successful ones) without "
+                     "necessarily setting the log level to 'debug'. Ensure that either --writeLogs "
+                     "or --writeLogsGzip is set if enabling this option.")
     addOptionFn("--realTimeLogging", dest="realTimeLogging", action="store_true", default=False,
                 help="Enable real-time logging from workers to masters")
 
@@ -566,8 +580,9 @@ def _addOptions(addGroupFn, config):
                 help="Set an environment variable early on in the worker. If VALUE is omitted, "
                      "it will be looked up in the current environment. Independently of this "
                      "option, the worker will try to emulate the leader's environment before "
-                     "running a job. Using this option, a variable can be injected into the "
-                     "worker process itself before it is started.")
+                     "running a job, except for some variables known to vary across systems. "
+                     "Using this option, a variable can be injected into the worker process "
+                     "itself before it is started.")
     addOptionFn("--servicePollingInterval", dest="servicePollingInterval", default=None,
                 help="Interval of time service jobs wait between polling for the existence"
                 " of the keep-alive flag (defailt=%s)" % config.servicePollingInterval)
@@ -583,6 +598,9 @@ def _addOptions(addGroupFn, config):
                 help="Experimental no forking mode for local debugging."
                      " Specifically, workers are not forked and"
                      " stderr/stdout are not redirected to the log.")
+    addOptionFn("--disableWorkerOutputCapture", default=False, action="store_true",
+                help="Let worker output go to worker's standard"
+                     " out/error instead of per-job logs.")
     addOptionFn("--badWorker", dest="badWorker", default=None,
                 help=(
                 "For testing purposes randomly kill 'badWorker' proportion of jobs using SIGKILL, default=%s" % config.badWorker))
@@ -1320,11 +1338,11 @@ def getDirSizeRecursively(dirPath):
     This method will return the cumulative number of bytes occupied by the files
     on disk in the directory and its subdirectories.
 
-    This method will raise a 'subprocess.CalledProcessError' if it is unable to
-    access a folder or file because of insufficient permissions.  Therefore this
-    method should only be called on the jobStore, and will alert the user if some
-    portion is inaccessible.  Everything in the jobStore should have appropriate
-    permissions as there is no way to read the filesize without permissions.
+    If the method is unable to access a file or directory (due to insufficient
+    permissions, or due to the file or directory having been removed while this
+    function was attempting to traverse it), the error will be handled
+    internally, and a (possibly 0) lower bound on the size of the directory
+    will be returned.
 
     The environment variable 'BLOCKSIZE'='512' is set instead of the much cleaner
     --block-size=1 because Apple can't handle it.
@@ -1338,8 +1356,13 @@ def getDirSizeRecursively(dirPath):
     # The call: 'du -s /some/path' should give the number of 512-byte blocks
     # allocated with the environment variable: BLOCKSIZE='512' set, and we
     # multiply this by 512 to return the filesize in bytes.
-    return int(subprocess.check_output(['du', '-s', dirPath],
-                                       env=dict(os.environ, BLOCKSIZE='512')).decode('utf-8').split()[0]) * 512
+    
+    try:
+        return int(subprocess.check_output(['du', '-s', dirPath],
+                                           env=dict(os.environ, BLOCKSIZE='512')).decode('utf-8').split()[0]) * 512
+    except subprocess.CalledProcessError:
+        # Something was inaccessible or went away
+        return 0
 
 
 def getFileSystemSize(dirPath):
