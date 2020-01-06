@@ -112,7 +112,13 @@ class MergeInputsNested(MergeInputs):
     based on the merge_nested behavior (as described in the CWL spec).
     """
     def resolve(self):
-        return [v[1][v[0]] for v in self.sources]
+        result = []
+        for promise in self.sources:
+            if isinstance(promise, tuple):
+                result.append(promise[1][0][promise[0]])
+            else:
+                result.append(promise[1][promise[0]])
+        return result
 
 
 class MergeInputsFlattened(MergeInputs):
