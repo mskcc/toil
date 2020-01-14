@@ -633,13 +633,16 @@ class CWLJob(Job):
             uploadFile, functools.partial(writeGlobalFileWrapper, file_store),
             index, existing))
 
-        metadata[process_uuid] = {
-            'started_at': started_at,
-            'ended_at': ended_at,
-            'job_order': cwljob,
-            'outputs': output,
-            'internal_name': self.jobName
-        }
+        if self.runtime_context.disable_user_provenance and self.runtime_context.disable_host_provenance and self.runtime_context.provenance == None:
+            metadata = {}
+        else:
+            metadata[process_uuid] = {
+                'started_at': started_at,
+                'ended_at': ended_at,
+                'job_order': cwljob,
+                'outputs': output,
+                'internal_name': self.jobName
+            }
         return output, metadata
 
 
