@@ -633,7 +633,7 @@ class CWLJob(Job):
             uploadFile, functools.partial(writeGlobalFileWrapper, file_store),
             index, existing))
 
-        if self.runtime_context.disable_user_provenance and self.runtime_context.disable_host_provenance and self.runtime_context.provenance == None:
+        if self.runtime_context.store_provenance == False:
             metadata = {}
         else:
             metadata[process_uuid] = {
@@ -1248,6 +1248,10 @@ def main(args=None, stdout=sys.stdout):
     runtime_context = cwltool.context.RuntimeContext(vars(options))
     runtime_context.find_default_container = functools.partial(
         find_default_container, options)
+    if not options.user_provenance and not options.host_provenance and options.provenance == None:
+        runtime_context.store_provenance = False
+    else:
+        runtime_context.store_provenance = True
     runtime_context.workdir = workdir
     runtime_context.move_outputs = "leave"
     runtime_context.rm_tmpdir = False
