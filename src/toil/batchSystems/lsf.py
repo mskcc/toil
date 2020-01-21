@@ -78,19 +78,19 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                                        env=combinedEnv)
             line = process.stdout.readline().decode('utf-8')
             logger.debug("BSUB: " + line)
-	    try:
-		result = int(line.strip().split()[1].strip('<>'))
-		logger.debug("Got the job id: {}".format(result))
-	    except Exception:
-		logger.error("Could not submit job:\n{}".format(traceback.format_exc()))
-		result = "NOT_SUBMITTED"
+            try:
+                result = int(line.strip().split()[1].strip('<>'))
+                logger.debug("Got the job id: {}".format(result))
+            except Exception:
+                logger.error("Could not submit job:\n{}".format(traceback.format_exc()))
+                result = "NOT_SUBMITTED"
             return result
 
         def getJobExitCode(self, lsfJobID):
             # the task is set as part of the job ID if using getBatchSystemID()
-	    if lsfJobID == "NOT_SUBMITTED":
-		logger.error("bjobs detected job failed to submit")
-		return 1
+            if lsfJobID == "NOT_SUBMITTED":
+                logger.error("bjobs detected job failed to submit")
+                return 1
             job, task = (lsfJobID, None)
             if '.' in lsfJobID:
                 job, task = lsfJobID.split('.', 1)
