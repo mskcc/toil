@@ -27,6 +27,8 @@ import math
 from toil import subprocess
 import os
 import traceback
+import json
+import re
 
 from dateutil.parser import parse
 from dateutil.tz import tzlocal
@@ -76,13 +78,14 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
             combinedEnv.update(os.environ)
             process = subprocess.Popen(subLine, stdout=subprocess.PIPE,
                                        env=combinedEnv)
-            line = process.stdout.readline().decode('utf-8')
-            logger.debug("BSUB: " + line)
-            try:
-                result = int(line.strip().split()[1].strip('<>'))
+            output = process.stdout.read().decode('utf-8')
+            logger.debug("BSUB: " + output)
+            result_str = re.search('Job <(.*)> is submitted', output)
+            if result_str:
+                result = int(result_str)
                 logger.debug("Got the job id: {}".format(result))
-            except Exception:
-                logger.error("Could not submit job:\n{}".format(traceback.format_exc()))
+            else:
+                logger.error("Could not submit job\nReason: {}".format(output))
                 result = "NOT_SUBMITTED"
             return result
 
