@@ -99,43 +99,60 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                 job, task = lsfJobID.split('.', 1)
 
             # first try bjobs to find out job state
-            args = ["bjobs", "-l", str(job)]
+            args = ["bjobs", "-json", "-o",
+                    "user exit_code stat kill_reason pend_reason", str(job)]
             logger.debug("Checking job exit code for job via bjobs: "
                          "{}".format(job))
             process = subprocess.Popen(args, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT)
-            output = process.stdout.read().decode('utf-8').replace("\n                     ", "")
-            process_output = output.split('\n')
+            output = process.stdout.read().decode('utf-8')
+
+            try:
+                bjobs_output = json.loads(output)
+            except json.decoder.JSONDecodeError:
+                logger.error("Could not parse bjobs output: "
+                             "{}".format(output))
             started = 0
-            for line in process_output:
-                if "Done successfully" in line or "Status <DONE>" in line:
-                    logger.debug("bjobs detected job completed for job: "
-                                 "{}".format(job))
-                    return 0
-                elif "New job is waiting for scheduling" in line:
-                    logger.debug("bjobs detected job pending scheduling for "
-                                 "job: {}".format(job))
-                    return None
-                elif "PENDING REASONS" in line or "Status <PEND>" in line:
-                    logger.debug("bjobs detected job pending for job: "
-                                 "{}".format(job))
-                    return None
-                elif "Exited with exit code" in line or "Status <EXIT>" in line:
-                    exit = int(line[line.find("Exited with exit code ")+22:]
-                               .split('.')[0])
-                    logger.error("bjobs detected job exit code "
-                                 "{} for job {}".format(exit, job))
-                    return exit
-                elif "Completed <exit>" in line:
-                    logger.error("bjobs detected job failed for job: "
-                                 "{}".format(job))
-                    return 1
-                elif line.find("Started on ") > -1 or "Status <RUN>" in line:
-                    started = 1
-            if started == 1:
-                logger.debug("bjobs detected job started but not completed: "
-                             "{}".format(job))
-                return None
+
+            if 'RECORDS' in bjobs_output:
+                if bjobs_output['RECORDS']:
+                    process_output = bjobs_output['RECORDS'][0]
+                    if 'STAT' in process_output:
+                        process_status = process_output['STAT']
+                        if process_status == 'DONE':
+                            logger.debug(
+                                "bjobs detected job completed for job: {}".format(job))
+                            return 0
+                        if process_status == 'PEND':
+                            pending_info = ""
+                            if process_status['PEND_REASON']:
+                                pending_info = "\n" + \
+                                    process_status['PEND_REASON']
+                            logger.debug(
+                                "bjobs detected job pending with: {}\nfor job: {}".format(pending_info, job))
+                            return None
+                        if process_status == 'EXIT':
+                            exit_code = process_status['EXIT_CODE']
+                            exit_reason = process_status['EXIT_REASON']
+                            exit_info = ""
+                            if exit_code:
+                                exit_info = "\nexit code: {}".format(exit_code)
+                            if exit_reason:
+                                exit_info += "\nexit reason: {}".format(exit_reason)
+                            logger.error(
+                                "bjobs detected job failed with: {}\nfor job: {}".format(exit_info, job))
+                            if exit_code:
+                                return exit_code
+                            else:
+                                return 1
+                        if process_status == 'RUN':
+                            logger.debug(
+                                "bjobs detected job started but not completed for job: {}".format(job))
+                            return None
+                        if process_status in {'PSUSP', 'USUSP', 'SSUSP'}:
+                            logger.debug(
+                                "bjobs detected job suspended for job: {}".format(job))
+                            return None
 
             # if not found in bjobs, then try bacct (slower than bjobs)
             logger.debug("bjobs failed to detect job - trying bacct: "
