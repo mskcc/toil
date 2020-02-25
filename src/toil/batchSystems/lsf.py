@@ -29,6 +29,7 @@ import os
 import traceback
 import json
 import re
+from random import randint
 
 from dateutil.parser import parse
 from dateutil.tz import tzlocal
@@ -86,12 +87,13 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                 logger.debug("Got the job id: {}".format(result))
             else:
                 logger.error("Could not submit job\nReason: {}".format(output))
-                result = "NOT_SUBMITTED"
+                temp_id = randint(10000000, 99999999)
+                result = "NOT_SUBMITTED_{}".format(temp_id)
             return result
 
         def getJobExitCode(self, lsfJobID):
             # the task is set as part of the job ID if using getBatchSystemID()
-            if lsfJobID == "NOT_SUBMITTED":
+            if "NOT_SUBMITTED" in lsfJobID:
                 logger.error("bjobs detected job failed to submit")
                 return 1
             job, task = (lsfJobID, None)
