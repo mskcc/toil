@@ -56,17 +56,29 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                 currentjobs = dict((str(self.batchJobIDs[x][0]), x) for x in
                                    self.runningJobs)
             process = subprocess.Popen(
-                    ["bjobs", "-o", "jobid stat start_time delimiter='|'"],
+                    ["bjobs","-json","-o", "jobid stat start_time"],
                     stdout=subprocess.PIPE)
             stdout, _ = process.communicate()
 
-            for curline in stdout.decode('utf-8').split('\n'):
-                items = curline.strip().split('|')
-                if items[0] in currentjobs and items[1] == 'RUN':
-                    jobstart = parse(items[2], default=datetime.now(tzlocal()))
-                    times[currentjobs[items[0]]] = datetime.now(tzlocal()) \
+            output = stdout.decode('utf-8')
+            bjobs_records = []
+            try:
+                bjobs_output = json.loads(output)
+                if 'RECORDS' in bjobs_output:
+                    bjobs_records = bjobs_output['RECORDS']
+            except json.decoder.JSONDecodeError:
+                logger.error("Could not parse bjobs output: "
+                             "{}".format(output))
+
+            if bjobs_records:
+                for single_item in bjobs_records:
+                    if single_item['STAT'] == 'RUN' and single_item['JOBID'] in currentjobs:
+                        jobstart = parse(single_item['START_TIME'], default=datetime.now(tzlocal()))
+                        times[currentjobs[single_item['JOBID']]] = datetime.now(tzlocal()) \
                         - jobstart
             return times
+
+
 
         def killJob(self, jobID):
             subprocess.check_call(['bkill', self.getBatchSystemID(jobID)])
