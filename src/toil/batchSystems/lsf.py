@@ -89,13 +89,14 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
         def submitJob(self, subLine):
             combinedEnv = self.boss.environment
             combinedEnv.update(os.environ)
-            process = subprocess.Popen(subLine, stdout=subprocess.PIPE,
+            process = subprocess.Popen(subLine, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        env=combinedEnv)
             output = process.stdout.read().decode('utf-8')
             logger.debug("BSUB: " + output)
             result_str = re.search('Job <(.*)> is submitted', output)
+
             if result_str:
-                result = int(result_str)
+                result = int(result_str[1])
                 logger.debug("Got the job id: {}".format(result))
             else:
                 logger.error("Could not submit job\nReason: {}".format(output))
