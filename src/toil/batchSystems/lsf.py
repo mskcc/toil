@@ -115,7 +115,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
 
             # first try bjobs to find out job state
             args = ["bjobs", "-json", "-o",
-                    "user exit_code stat kill_reason pend_reason", str(job)]
+                    "user exit_code stat exit_reason pend_reason", str(job)]
             logger.debug("Checking job exit code for job via bjobs: "
                          "{}".format(job))
             process = subprocess.Popen(args, stdout=subprocess.PIPE,
