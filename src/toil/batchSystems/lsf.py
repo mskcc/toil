@@ -92,7 +92,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                     logger.error("Could not parse bjobs output: {}".format(bjobs_output_str))
                 if 'RECORDS' in bjobs_dict:
                     bjobs_records = bjobs_dict['RECORDS']
-            if not bjobs_records:
+            if bjobs_records == None:
                 logger.error("Could not find bjobs output json in: {}".format(bjobs_output_str))
 
             return bjobs_records
