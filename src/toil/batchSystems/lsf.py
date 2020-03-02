@@ -141,15 +141,22 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                         return 0
                     if process_status == 'PEND':
                         pending_info = ""
-                        if process_output['PEND_REASON']:
-                            pending_info = "\n" + \
-                                process_output['PEND_REASON']
+                        if 'PEND_REASON' in process_output:
+                            if process_output['PEND_REASON']:
+                                pending_info = "\n" + \
+                                    process_output['PEND_REASON']
                         logger.debug(
                             "bjobs detected job pending with: {}\nfor job: {}".format(pending_info, job))
                         return None
                     if process_status == 'EXIT':
-                        exit_code = process_output['EXIT_CODE']
-                        exit_reason = process_output['EXIT_REASON']
+                        exit_code = 1
+                        exit_reason = ""
+                        if 'EXIT_CODE' in process_output:
+                            exit_code_str = process_output['EXIT_CODE']
+                            if exit_code_str:
+                                exit_code = int(exit_code_str)
+                        if 'EXIT_REASON' in process_output:
+                            exit_reason = process_output['EXIT_REASON']
                         exit_info = ""
                         if exit_code:
                             exit_info = "\nexit code: {}".format(exit_code)
@@ -157,10 +164,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                             exit_info += "\nexit reason: {}".format(exit_reason)
                         logger.error(
                             "bjobs detected job failed with: {}\nfor job: {}".format(exit_info, job))
-                        if exit_code:
-                            return exit_code
-                        else:
-                            return 1
+                        return exit_code
                     if process_status == 'RUN':
                         logger.debug(
                             "bjobs detected job started but not completed for job: {}".format(job))
