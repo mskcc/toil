@@ -81,20 +81,20 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
         def parseBjobs(self,bjobs_output_str):
             bjobs_dict = None
             bjobs_records = None
-            try:
-                # Handle Cannot connect to LSF. Please wait ... type messages
-                dict_start = bjobs_output_str.find('{')
-                dict_end = bjobs_output_str.rfind('}')
-                if dict_start != -1 and dict_end != -1:
-                    bjobs_output = bjobs_output_str[dict_start:(dict_end+1)]
+            # Handle Cannot connect to LSF. Please wait ... type messages
+            dict_start = bjobs_output_str.find('{')
+            dict_end = bjobs_output_str.rfind('}')
+            if dict_start != -1 and dict_end != -1:
+                bjobs_output = bjobs_output_str[dict_start:(dict_end+1)]
+                try:
                     bjobs_dict = json.loads(bjobs_output)
-                    if 'RECORDS' in bjobs_dict:
-                        bjobs_records = bjobs_output['RECORDS']
-                else:
-                    logger.error("Could not find bjobs output json in: {}".format(bjobs_output_str))
-            except json.decoder.JSONDecodeError:
-                logger.error("Could not parse bjobs output: "
-                             "{}".format(output))
+                except json.decoder.JSONDecodeError:
+                    logger.error("Could not parse bjobs output: {}".format(bjobs_output_str))
+                if 'RECORDS' in bjobs_dict:
+                    bjobs_records = bjobs_dict['RECORDS']
+            if not bjobs_records:
+                logger.error("Could not find bjobs output json in: {}".format(bjobs_output_str))
+
             return bjobs_records
 
 
