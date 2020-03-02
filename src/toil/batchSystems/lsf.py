@@ -61,15 +61,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
             stdout, _ = process.communicate()
 
             output = stdout.decode('utf-8')
-            bjobs_records = []
-            try:
-                bjobs_output = json.loads(output)
-                if 'RECORDS' in bjobs_output:
-                    bjobs_records = bjobs_output['RECORDS']
-            except json.decoder.JSONDecodeError:
-                logger.error("Could not parse bjobs output: "
-                             "{}".format(output))
-
+            bjobs_records = self.parseBjobs(output)
             if bjobs_records:
                 for single_item in bjobs_records:
                     if single_item['STAT'] == 'RUN' and single_item['JOBID'] in currentjobs:
@@ -85,6 +77,26 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
 
         def prepareSubmission(self, cpu, memory, jobID, command):
             return self.prepareBsub(cpu, memory, jobID) + [command]
+
+        def parseBjobs(self,bjobs_output_str):
+            bjobs_dict = None
+            bjobs_records = None
+            try:
+                # Handle Cannot connect to LSF. Please wait ... type messages
+                dict_start = bjobs_output_str.find('{')
+                dict_end = bjobs_output_str.rfind('}')
+                if dict_start != -1 and dict_end != -1:
+                    bjobs_output = bjobs_output_str[dict_start:(dict_end+1)]
+                    bjobs_dict = json.loads(bjobs_output)
+                    if 'RECORDS' in bjobs_dict:
+                        bjobs_records = bjobs_output['RECORDS']
+                else:
+                    logger.error("Could not find bjobs output json in: {}".format(bjobs_output_str))
+            except json.decoder.JSONDecodeError:
+                logger.error("Could not parse bjobs output: "
+                             "{}".format(output))
+            return bjobs_records
+
 
         def submitJob(self, subLine):
             combinedEnv = self.boss.environment
@@ -121,16 +133,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
             process = subprocess.Popen(args, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT)
             output = process.stdout.read().decode('utf-8')
-            bjobs_records = []
-            try:
-                bjobs_output = json.loads(output)
-                if 'RECORDS' in bjobs_output:
-                    bjobs_records = bjobs_output['RECORDS']
-            except json.decoder.JSONDecodeError:
-                logger.error("Could not parse bjobs output: "
-                             "{}".format(output))
-            started = 0
-
+            bjobs_records = self.parseBjobs(output)
             if bjobs_records:
                 process_output = bjobs_records[0]
                 if 'STAT' in process_output:
