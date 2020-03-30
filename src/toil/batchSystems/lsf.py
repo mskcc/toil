@@ -108,7 +108,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
             result_str = re.search('Job <(.*)> is submitted', output)
 
             if result_str:
-                result = int(result_str[1])
+                result = int(result_str.group(1))
                 logger.debug("Got the job id: {}".format(result))
             else:
                 logger.error("Could not submit job\nReason: {}".format(output))
