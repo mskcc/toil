@@ -307,7 +307,7 @@ class ToilCommandLineTool(cwltool.command_line_tool.CommandLineTool):
                          separateDirs):
         return ToilPathMapper(
             reffiles, runtimeContext.basedir, stagedir, separateDirs,
-            runtimeContext.toil_get_file)
+            runtimeContext.toil_get_file, True)
 
 
 def toil_make_tool(toolpath_object, loading_context):
