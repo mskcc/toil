@@ -13,37 +13,27 @@
 # limitations under the License.
 
 from __future__ import absolute_import, print_function
+
 from future import standard_library
+
 standard_library.install_aliases()
 from builtins import map
 from builtins import str
-from builtins import range
-from builtins import object
-from abc import abstractmethod, ABCMeta
-from collections import namedtuple, defaultdict
+from collections import defaultdict
 from contextlib import contextmanager
-from functools import partial
-from hashlib import sha1
-from future.utils import with_metaclass
-import base64
 import dill
 import errno
 import fcntl
 import logging
 import os
-import shutil
-import stat
 import sys
-import tempfile
-import time
 import uuid
 
 from toil.lib.misc import robust_rmtree
-from toil.lib.objects import abstractclassmethod
+from toil.lib.threading import get_process_name, process_name_exists
 from toil.lib.humanize import bytes2human
-from toil.common import cacheDirName, getDirSizeRecursively, getFileSystemSize
+from toil.common import getDirSizeRecursively, getFileSystemSize
 from toil.lib.bioio import makePublicDir
-from toil.resource import ModuleDescriptor
 from toil.fileStores.abstractFileStore import AbstractFileStore
 from toil.fileStores import FileID
 
@@ -66,7 +56,7 @@ class NonCachingFileStore(AbstractFileStore):
         jobReqs = job.disk
         startingDir = os.getcwd()
         self.localTempDir = makePublicDir(os.path.join(self.localTempDir, str(uuid.uuid4())))
-        self._removeDeadJobs(self.workFlowDir)
+        self._removeDeadJobs(self.workDir)
         self.jobStateFile = self._createJobStateFile()
         freeSpace, diskSize = getFileSystemSize(self.localTempDir)
         if freeSpace <= 0.1 * diskSize:
@@ -103,9 +93,6 @@ class NonCachingFileStore(AbstractFileStore):
         return FileID.forPath(fileStoreID, absLocalFileName)
 
     def readGlobalFile(self, fileStoreID, userPath=None, cache=True, mutable=False, symlink=False):
-        if not isinstance(fileStoreID, FileID):
-            # Don't let the user forge File IDs.
-            raise TypeError('Received file ID not of type FileID: {}'.format(fileStoreID))
         if userPath is not None:
             localFilePath = self._resolveAbsoluteLocalPath(userPath)
             if os.path.exists(localFilePath):
@@ -119,9 +106,6 @@ class NonCachingFileStore(AbstractFileStore):
 
     @contextmanager
     def readGlobalFileStream(self, fileStoreID):
-        if not isinstance(fileStoreID, FileID):
-            # Don't let the user forge File IDs.
-            raise TypeError('Received file ID not of type FileID: {}'.format(fileStoreID))
         with self.jobStore.readFileStream(fileStoreID) as f:
             yield f
 
@@ -129,9 +113,6 @@ class NonCachingFileStore(AbstractFileStore):
         self.jobStore.exportFile(jobStoreFileID, dstUrl)
 
     def deleteLocalFile(self, fileStoreID):
-        if not isinstance(fileStoreID, FileID):
-            # Don't let the user forge File IDs.
-            raise TypeError('Received file ID not of type FileID: {}'.format(fileStoreID))
         try:
             localFilePaths = self.localFileMap.pop(fileStoreID)
         except KeyError:
@@ -141,9 +122,6 @@ class NonCachingFileStore(AbstractFileStore):
                 os.remove(localFilePath)
 
     def deleteGlobalFile(self, fileStoreID):
-        if not isinstance(fileStoreID, FileID):
-            # Don't let the user forge File IDs.
-            raise TypeError('Received file ID not of type FileID: {}'.format(fileStoreID))
         try:
             self.deleteLocalFile(fileStoreID)
         except OSError as e:
@@ -152,7 +130,7 @@ class NonCachingFileStore(AbstractFileStore):
                 pass
             else:
                 raise
-        self.filesToDelete.add(fileStoreID)
+        self.filesToDelete.add(str(fileStoreID))
 
     def waitForCommit(self):
         # there is no asynchronicity in this file store so no need to block at all
@@ -205,7 +183,7 @@ class NonCachingFileStore(AbstractFileStore):
         """
 
         for jobState in cls._getAllJobStates(nodeInfo):
-            if not cls._pidExists(jobState['jobPID']):
+            if not process_name_exists(nodeInfo, jobState['jobProcessName']):
                 # We need to have a race to pick someone to clean up.
                 
                 try:
@@ -244,7 +222,7 @@ class NonCachingFileStore(AbstractFileStore):
         one at a time.
 
         :param str workflowDir: The location of the workflow directory on the node.
-        :return: dict with keys (jobName,  jobPID, jobDir)
+        :return: dict with keys (jobName,  jobProcessName, jobDir)
         :rtype: dict
         """
         jobStateFiles = []
@@ -280,7 +258,7 @@ class NonCachingFileStore(AbstractFileStore):
         :rtype: str
         """
         jobStateFile = os.path.join(self.localTempDir, '.jobState')
-        jobState = {'jobPID': os.getpid(),
+        jobState = {'jobProcessName': get_process_name(self.workDir),
                     'jobName': self.jobName,
                     'jobDir': self.localTempDir}
         with open(jobStateFile + '.tmp', 'wb') as fH:

@@ -25,27 +25,12 @@ from abc import ABCMeta, abstractmethod
 from six.moves.queue import Empty, Queue
 from future.utils import with_metaclass
 
-from toil import subprocess
+from toil.lib.misc import CalledProcessErrorStderr
 from toil.lib.objects import abstractclassmethod
 
-from toil.batchSystems.abstractBatchSystem import BatchSystemLocalSupport
+from toil.batchSystems.abstractBatchSystem import BatchSystemLocalSupport, UpdatedBatchJobInfo
 
 logger = logging.getLogger(__name__)
-
-
-def with_retries(operation, *args, **kwargs):
-    retries = 3
-    latest_err = None
-    while retries:
-        retries -= 1
-        try:
-            return operation(*args, **kwargs)
-        except subprocess.CalledProcessError as err:
-            latest_err = err
-            logger.error(
-                "Operation %s failed with code %d: %s",
-                operation, err.returncode, err.output)
-    raise latest_err
 
 
 class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
@@ -130,12 +115,12 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
             while len(self.waitingJobs) > 0 and \
                     len(self.runningJobs) < int(self.boss.config.maxLocalJobs):
                 activity = True
-                jobID, cpu, memory, command = self.waitingJobs.pop(0)
+                jobID, cpu, memory, command, jobName = self.waitingJobs.pop(0)
 
                 # prepare job submission command
-                subLine = self.prepareSubmission(cpu, memory, jobID, command)
+                subLine = self.prepareSubmission(cpu, memory, jobID, command, jobName)
                 logger.debug("Running %r", subLine)
-                batchJobID = with_retries(self.submitJob, subLine)
+                batchJobID = self.boss.with_retries(self.submitJob, subLine)
                 logger.debug("Submitted job %s", str(batchJobID))
 
                 # Store dict for mapping Toil job ID to batch job ID
@@ -184,13 +169,13 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
             while killList:
                 for jobID in list(killList):
                     batchJobID = self.getBatchSystemID(jobID)
-                    if with_retries(self.getJobExitCode, batchJobID) is not None:
+                    if self.boss.with_retries(self.getJobExitCode, batchJobID) is not None:
                         logger.debug('Adding jobID %s to killedJobsQueue', jobID)
                         self.killedJobsQueue.put(jobID)
                         killList.remove(jobID)
                         self.forgetJob(jobID)
                 if len(killList) > 0:
-                    logger.warn("Some jobs weren't killed, trying again in %is.", self.boss.sleepSeconds())
+                    logger.warning("Some jobs weren't killed, trying again in %is.", self.boss.sleepSeconds())
 
             return True
 
@@ -207,37 +192,45 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
             activity = False
             for jobID in list(self.runningJobs):
                 batchJobID = self.getBatchSystemID(jobID)
-                status = with_retries(self.getJobExitCode, batchJobID)
+                status = self.boss.with_retries(self.getJobExitCode, batchJobID)
                 if status is not None:
                     activity = True
-                    self.updatedJobsQueue.put((jobID, status))
+                    self.updatedJobsQueue.put(UpdatedBatchJobInfo(jobID=jobID, exitStatus=status, exitReason=None, wallTime=None))
                     self.forgetJob(jobID)
             self._checkOnJobsCache = activity
             self._checkOnJobsTimestamp = datetime.now()
             return activity
 
+        def _runStep(self):
+            """return True if more jobs, False is all done"""
+            activity = False
+            newJob = None
+            if not self.newJobsQueue.empty():
+                activity = True
+                newJob = self.newJobsQueue.get()
+                if newJob is None:
+                    logger.debug('Received queue sentinel.')
+                    return False
+            activity |= self.killJobs()
+            activity |= self.createJobs(newJob)
+            activity |= self.checkOnJobs()
+            if not activity:
+                logger.debug('No activity, sleeping for %is', self.boss.sleepSeconds())
+            return True
+
         def run(self):
             """
             Run any new jobs
             """
-
-            while True:
-                activity = False
-                newJob = None
-                if not self.newJobsQueue.empty():
-                    activity = True
-                    newJob = self.newJobsQueue.get()
-                    if newJob is None:
-                        logger.debug('Received queue sentinel.')
-                        break
-                activity |= self.killJobs()
-                activity |= self.createJobs(newJob)
-                activity |= self.checkOnJobs()
-                if not activity:
-                    logger.debug('No activity, sleeping for %is', self.boss.sleepSeconds())
+            try:
+                while self._runStep():
+                    pass
+            except Exception as ex:
+                logger.error("GridEngine like batch system failure", exc_info=ex)
+                raise
 
         @abstractmethod
-        def prepareSubmission(self, cpu, memory, jobID, command):
+        def prepareSubmission(self, cpu, memory, jobID, command, jobName):
             """
             Preparation in putting together a command-line string
             for submitting to batch system (via submitJob().)
@@ -246,6 +239,7 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
             :param: string memory
             :param: string jobID  : Toil job ID
             :param: string subLine: the command line string to be called
+            :param: string jobName: the name of the Toil job, to provide metadata to batch systems if desired
 
             :rtype: string
             """
@@ -334,8 +328,9 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
             self.checkResourceRequest(jobNode.memory, jobNode.cores, jobNode.disk)
             jobID = self.getNextJobID()
             self.currentJobs.add(jobID)
-            self.newJobsQueue.put((jobID, jobNode.cores, jobNode.memory, jobNode.command))
-            logger.debug("Issued the job command: %s with job id: %s ", jobNode.command, str(jobID))
+            self.newJobsQueue.put((jobID, jobNode.cores, jobNode.memory, jobNode.command, jobNode.jobName))
+            logger.debug("Issued the job command: %s with job id: %s and job name %s", jobNode.command, str(jobID),
+                         jobNode.jobName)
         return jobID
 
     def killBatchJobs(self, jobIDs):
@@ -378,7 +373,7 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
                 self.config.statePollingWait):
             batchIds = self._getRunningBatchJobIDsCache
         else:
-            batchIds = with_retries(self.worker.getRunningJobIDs)
+            batchIds = self.with_retries(self.worker.getRunningJobIDs)
             self._getRunningBatchJobIDsCache = batchIds
             self._getRunningBatchJobIDsTimestamp = datetime.now()
         batchIds.update(self.getRunningLocalJobIDs())
@@ -394,9 +389,8 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
             except Empty:
                 return None
             logger.debug('UpdatedJobsQueue Item: %s', item)
-            jobID, retcode = item
-            self.currentJobs.remove(jobID)
-            return jobID, retcode, None
+            self.currentJobs.remove(item.jobID)
+            return item
 
     def shutdown(self):
         """
@@ -430,3 +424,24 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
         Returns the max. memory and max. CPU for the system
         """
         raise NotImplementedError()
+
+    def with_retries(self, operation, *args, **kwargs):
+        """
+        Call operation with args and kwargs. If one of the calls to an SGE
+        command fails, sleep and try again for a set number of times.
+        """
+        maxTries = 3
+        tries = 0
+        while True:
+            tries += 1
+            try:
+                return operation(*args, **kwargs)
+            except CalledProcessErrorStderr as err:
+                if tries < maxTries:
+                    logger.error("Will retry errored operation %s, code %d: %s",
+                                 operation.__name__, err.returncode, err.stderr)
+                    time.sleep(self.config.statePollingWait)
+                else:
+                    logger.error("Failed operation %s, code %d: %s",
+                                 operation.__name__, err.returncode, err.stderr)
+                    raise err

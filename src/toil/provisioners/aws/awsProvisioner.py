@@ -20,7 +20,7 @@ import string
 
 # Python 3 compatibility imports
 from _ssl import SSLError
-from six import iteritems
+from six import iteritems, text_type
 from toil.lib.memoize import memoize
 import boto.ec2
 from boto.ec2.blockdevicemapping import BlockDeviceMapping, BlockDeviceType
@@ -73,7 +73,7 @@ def awsFilterImpairedNodes(nodes, ec2):
     statusMap = {status.id: status.instance_status for status in statuses}
     healthyNodes = [node for node in nodes if statusMap.get(node.id, None) != 'impaired']
     impairedNodes = [node.id for node in nodes if statusMap.get(node.id, None) == 'impaired']
-    logger.warn('TOIL_AWS_NODE_DEBUG is set and nodes %s have failed EC2 status checks so '
+    logger.warning('TOIL_AWS_NODE_DEBUG is set and nodes %s have failed EC2 status checks so '
                 'will not be terminated.', ' '.join(impairedNodes))
     return healthyNodes
 
@@ -131,6 +131,10 @@ class AWSProvisioner(AbstractProvisioner):
         self._tags = self.getLeader().tags
         self._masterPublicKey = self._setSSH()
         self._leaderProfileArn = instanceMetaData['iam']['info']['InstanceProfileArn']
+        # The existing metadata API returns a single string if there is one security group, but
+        # a list when there are multiple: change the format to always be a list.
+        rawSecurityGroups = instanceMetaData['security-groups']
+        self._leaderSecurityGroupNames = [rawSecurityGroups] if not isinstance(rawSecurityGroups, list) else rawSecurityGroups
 
     def launchCluster(self, leaderNodeType, leaderStorage, owner, **kwargs):
         """
@@ -150,12 +154,18 @@ class AWSProvisioner(AbstractProvisioner):
         bdm = self._getBlockDeviceMapping(E2Instances[leaderNodeType], rootVolSize=leaderStorage)
 
         self._masterPublicKey = 'AAAAB3NzaC1yc2Enoauthorizedkeyneeded' # dummy key
-        userData =  self._getCloudConfigUserData('leader', self._masterPublicKey)
-        specKwargs = {'key_name': self._keyName, 'security_group_ids': [sg.id for sg in sgs],
-                  'instance_type': leaderNodeType,
-                  'user_data': userData, 'block_device_map': bdm,
-                  'instance_profile_arn': profileArn,
-                  'placement': self._zone}
+        userData = self._getCloudConfigUserData('leader', self._masterPublicKey)
+        if isinstance(userData, text_type):
+            # Spot-market provisioning requires bytes for user data.
+            # We probably won't have a spot-market leader, but who knows!
+            userData = userData.encode('utf-8')
+        specKwargs = {'key_name': self._keyName,
+                      'security_group_ids': [sg.id for sg in sgs] + kwargs.get('awsEc2ExtraSecurityGroupIds', []),
+                      'instance_type': leaderNodeType,
+                      'user_data': userData,
+                      'block_device_map': bdm,
+                      'instance_profile_arn': profileArn,
+                      'placement': self._zone}
         if self._vpcSubnet:
             specKwargs["subnet_id"] = self._vpcSubnet
         instances = create_ondemand_instances(self._ctx.ec2, image_id=self._discoverAMI(),
@@ -281,8 +291,11 @@ class AWSProvisioner(AbstractProvisioner):
         bdm = self._getBlockDeviceMapping(instanceType, rootVolSize=self._nodeStorage)
 
         keyPath = self._sseKey if self._sseKey else None
-        userData =  self._getCloudConfigUserData('worker', self._masterPublicKey, keyPath, preemptable)
-        sgs = [sg for sg in self._ctx.ec2.get_all_security_groups() if sg.name == self.clusterName]
+        userData = self._getCloudConfigUserData('worker', self._masterPublicKey, keyPath, preemptable)
+        if isinstance(userData, text_type):
+            # Spot-market provisioning requires bytes for user data.
+            userData = userData.encode('utf-8')
+        sgs = [sg for sg in self._ctx.ec2.get_all_security_groups() if sg.name in self._leaderSecurityGroupNames]
         kwargs = {'key_name': self._keyName,
                   'security_group_ids': [sg.id for sg in sgs],
                   'instance_type': instanceType.name,
@@ -525,8 +538,9 @@ class AWSProvisioner(AbstractProvisioner):
         root_vol = BlockDeviceType(delete_on_termination=True)
         root_vol.size = rootVolSize
         bdm["/dev/xvda"] = root_vol
-        # the first disk is already attached for us so start with 2nd.
-        for disk in range(1, instanceType.disks + 1):
+        # The first disk is already attached for us so start with 2nd.
+        # Disk count is weirdly a float in our instance database, so make it an int here.
+        for disk in range(1, int(instanceType.disks) + 1):
             bdm[bdtKeys[disk]] = BlockDeviceType(
                 ephemeral_name='ephemeral{}'.format(disk - 1))  # ephemeral counts start at 0
 

@@ -44,7 +44,7 @@ class WritablePipe(with_metaclass(ABCMeta, object)):
 
     More complicated, less illustrative tests:
 
-    Same as above, but provving that handles are closed:
+    Same as above, but proving that handles are closed:
 
     >>> x = os.dup(0); os.close(x)
     >>> class MyPipe(WritablePipe):
@@ -85,15 +85,19 @@ class WritablePipe(with_metaclass(ABCMeta, object)):
 
     def _reader(self):
         with os.fdopen(self.readable_fh, 'rb') as readable:
-            # FIXME: another race here, causing a redundant attempt to close in the main thread
+            # TODO: If the reader somehow crashes here, both threads might try
+            # to close readable_fh.  Fortunately we don't do anything that
+            # should be able to fail here.
             self.readable_fh = None  # signal to parent thread that we've taken over
             self.readFrom(readable)
+            self.reader_done = True
 
     def __init__(self):
         super(WritablePipe, self).__init__()
         self.readable_fh = None
         self.writable = None
         self.thread = None
+        self.reader_done = False
 
     def __enter__(self):
         self.readable_fh, writable_fh = os.pipe()
@@ -103,25 +107,27 @@ class WritablePipe(with_metaclass(ABCMeta, object)):
         return self.writable
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        # Closeing the writable end will send EOF to the readable and cause the reader thread
+        # to finish.
+        # TODO: Can close() fail? If so, whould we try and clean up after the reader?
+        self.writable.close()
         try:
-            self.writable.close()
-            # Closeing the writable end will send EOF to the readable and cause the reader thread
-            # to finish.
             if self.thread is not None:
                 # reraises any exception that was raised in the thread
                 self.thread.join()
-        except:
+        except Exception as e:
             if exc_type is None:
                 # Only raise the child exception if there wasn't
                 # already an exception in the main thread
                 raise
+            else:
+                log.error('Swallowing additional exception in reader thread: %s', str(e))
         finally:
             # The responsibility for closing the readable end is generally that of the reader
             # thread. To cover the small window before the reader takes over we also close it here.
             readable_fh = self.readable_fh
             if readable_fh is not None:
-                # FIXME: This is still racy. The reader thread could close it now, and someone
-                # else may immediately open a new file, reusing the file handle.
+                # Close the file handle. The reader thread must be dead now. 
                 os.close(readable_fh)
 
 
@@ -158,7 +164,7 @@ class ReadablePipe(with_metaclass(ABCMeta, object)):
 
     More complicated, less illustrative tests:
 
-    Same as above, but provving that handles are closed:
+    Same as above, but proving that handles are closed:
 
     >>> x = os.dup(0); os.close(x)
     >>> class MyPipe(ReadablePipe):
@@ -234,3 +240,57 @@ class ReadablePipe(with_metaclass(ABCMeta, object)):
                 # Only raise the child exception if there wasn't
                 # already an exception in the main thread
                 raise
+                
+class ReadableTransformingPipe(ReadablePipe):
+    """
+    A pipe which is constructed around a readable stream, and which provides a
+    context manager that gives a readable stream.
+    
+    Useful as a base class for pipes which have to transform or otherwise visit
+    bytes that flow through them, instead of just consuming or producing data.
+    
+    Clients should subclass it and implement :meth:`.transform`, like so:
+    
+    >>> import sys, shutil
+    >>> class MyPipe(ReadableTransformingPipe):
+    ...     def transform(self, readable, writable):
+    ...         writable.write(readable.read().decode('utf-8').upper().encode('utf-8'))
+    >>> class SourcePipe(ReadablePipe):
+    ...     def writeTo(self, writable):
+    ...         writable.write('Hello, world!\\n'.encode('utf-8'))
+    >>> with SourcePipe() as source:
+    ...     with MyPipe(source) as transformed:
+    ...         shutil.copyfileobj(codecs.getreader('utf-8')(transformed), sys.stdout)
+    HELLO, WORLD!
+    
+    The :meth:`.transform` method runs in its own thread, and should move data
+    chunk by chunk instead of all at once. It should finish normally if it
+    encounters either an EOF on the readable, or a :class:`BrokenPipeError` on
+    the writable. This means tat it should make sure to actually catch a
+    :class:`BrokenPipeError` when writing.
+    
+    See also: :class:`toil.lib.misc.WriteWatchingStream`.
+    
+    """
+    
+    def __init__(self, source):
+        super(ReadableTransformingPipe, self).__init__()
+        self.source = source
+        
+    @abstractmethod
+    def transform(self, readable, writable):
+        """
+        Implement this method to ship data through the pipe.
+
+        :param file readable: the input stream file object to transform.
+
+        :param file writable: the file object representing the writable end of the pipe. Do not
+        explicitly invoke the close() method of the object, that will be done automatically.
+        """
+        raise NotImplementedError()
+    
+    def writeTo(self, writable):
+        self.transform(self.source, writable)
+    
+    
+

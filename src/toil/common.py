@@ -33,7 +33,7 @@ from six import iteritems
 
 from toil.lib.humanize import bytes2human
 from toil.lib.retry import retry
-from toil import subprocess
+import subprocess
 from toil import pickle
 from toil import logProcessContext
 from toil.lib.bioio import addLoggingOptions, getLogLevelString, setLoggingFromOptions
@@ -99,7 +99,8 @@ class Config(object):
         # Parameters to limit service jobs, so preventing deadlock scheduling scenarios
         self.maxPreemptableServiceJobs = sys.maxsize
         self.maxServiceJobs = sys.maxsize
-        self.deadlockWait = 60  # Number of seconds to wait before declaring a deadlock
+        self.deadlockWait = 60  # Number of seconds we must be stuck with all services before declaring a deadlock
+        self.deadlockCheckInterval = 30 # Minimum polling delay for deadlocks
         self.statePollingWait = 1  # Number of seconds to wait before querying job state
 
         # Resource requirements
@@ -114,22 +115,25 @@ class Config(object):
 
         # Retrying/rescuing jobs
         self.retryCount = 1
+        self.enableUnlimitedPreemptableRetries = False
         self.maxJobDuration = sys.maxsize
         self.rescueJobsFrequency = 3600
 
         # Misc
         self.disableCaching = True
         self.disableChaining = False
+        self.disableJobStoreChecksumVerification = False
         self.maxLogFileSize = 64000
         self.writeLogs = None
         self.writeLogsGzip = None
         self.writeLogsFromAllJobs = False
         self.sseKey = None
-        self.cseKey = None
         self.servicePollingInterval = 60
         self.useAsync = True
         self.forceDockerAppliance = False
         self.runCwlInternalJobsOnWorkers = False
+        self.statusWait = 3600
+        self.disableProgress = False
 
         # Debug options
         self.debugWorker = False
@@ -216,10 +220,12 @@ class Config(object):
         setBatchOptions(self, setOption)
         setOption("disableAutoDeployment")
         setOption("scale", float, fC(0.0))
-        setOption("mesosMasterAddress")
         setOption("parasolCommand")
         setOption("parasolMaxBatches", int, iC(1))
         setOption("linkImports")
+        setOption("moveExports")
+        setOption("mesosMasterAddress")
+        setOption("kubernetesHostPath")
         setOption("environment", parseSetEnv)
 
         # Autoscaling options
@@ -248,6 +254,7 @@ class Config(object):
         setOption("maxServiceJobs", int)
         setOption("maxPreemptableServiceJobs", int)
         setOption("deadlockWait", int)
+        setOption("deadlockCheckInterval", int)
         setOption("statePollingWait", int)
 
         # Resource requirements
@@ -262,6 +269,7 @@ class Config(object):
 
         # Retrying/rescuing jobs
         setOption("retryCount", int, iC(1))
+        setOption("enableUnlimitedPreemptableRetries")
         setOption("maxJobDuration", int, iC(1))
         setOption("rescueJobsFrequency", int, iC(1))
 
@@ -269,11 +277,13 @@ class Config(object):
         setOption("maxLocalJobs", int)
         setOption("disableCaching")
         setOption("disableChaining")
+        setOption("disableJobStoreChecksumVerification")
         setOption("maxLogFileSize", h2b, iC(1))
         setOption("writeLogs")
         setOption("writeLogsGzip")
         setOption("writeLogsFromAllJobs")
         setOption("runCwlInternalJobsOnWorkers")
+        setOption("disableProgress")
 
         assert not (self.writeLogs and self.writeLogsGzip), \
             "Cannot use both --writeLogs and --writeLogsGzip at the same time."
@@ -285,7 +295,6 @@ class Config(object):
                 assert (len(f.readline().rstrip()) == 32)
 
         setOption("sseKey", checkFn=checkSse)
-        setOption("cseKey", checkFn=checkSse)
         setOption("servicePollingInterval", float, fC(0.0))
         setOption("forceDockerAppliance")
 
@@ -311,7 +320,6 @@ jobStoreLocatorHelp = ("A job store holds persistent information about the jobs 
                        "aws:<region>:<prefix> where <region> is the name of an AWS region like "
                        "us-west-2 and <prefix> will be prepended to the names of any top-level "
                        "AWS resources in use by job store, e.g. S3 buckets.\n\n "
-                       "azure:<account>:<prefix>\n\n"
                        "google:<project_id>:<prefix> TODO: explain\n\n"
                        "For backwards compatibility, you may also specify ./foo (equivalent to "
                        "file:./foo or just file:foo) or /bar (equivalent to file:/bar).")
@@ -328,13 +336,16 @@ def _addOptions(addGroupFn, config):
                 help="The location of the job store for the workflow. " + jobStoreLocatorHelp)
     addOptionFn("--workDir", dest="workDir", default=None,
                 help="Absolute path to directory where temporary files generated during the Toil "
-                     "run should be placed. Temp files and folders, as well as standard output "
-                     "and error from batch system jobs (unless --noStdOutErr), will be placed in a "
+                     "run should be placed. Standard output and error from batch system jobs "
+                     "(unless --noStdOutErr) will be placed in this directory. A cache directory "
+                     "may be placed in this directory. Temp files and folders will be placed in a "
                      "directory toil-<workflowID> within workDir. The workflowID is generated by "
                      "Toil and will be reported in the workflow logs. Default is determined by the "
                      "variables (TMPDIR, TEMP, TMP) via mkdtemp. This directory needs to exist on "
                      "all machines running jobs; if capturing standard output and error from batch "
-                     "system jobs is desired, it will generally need to be on a shared file system.")
+                     "system jobs is desired, it will generally need to be on a shared file system. "
+                     "When sharing a cache between containers on a host, this directory must be "
+                     "shared between the containers.")
     addOptionFn("--noStdOutErr", dest="noStdOutErr", action="store_true", default=None,
                 help="Do not capture standard output and error from batch system jobs.")
     addOptionFn("--stats", dest="stats", action="store_true", default=None,
@@ -386,9 +397,9 @@ def _addOptions(addGroupFn, config):
                              "in an autoscaled cluster, as well as parameters to control the "
                              "level of provisioning.")
 
-    addOptionFn("--provisioner", dest="provisioner", choices=['aws', 'azure', 'gce'],
+    addOptionFn("--provisioner", dest="provisioner", choices=['aws', 'gce'],
                 help="The provisioner for cluster auto-scaling. The currently supported choices are"
-                     "'azure', 'gce', or 'aws'. The default is %s." % config.provisioner)
+                     "'gce', or 'aws'. The default is %s." % config.provisioner)
 
     addOptionFn('--nodeTypes', default=None,
                 help="List of node types separated by commas. The syntax for each node type "
@@ -462,16 +473,26 @@ def _addOptions(addGroupFn, config):
             "Allows the specification of the maximum number of service jobs "
             "in a cluster. By keeping this limited "
             " we can avoid all the nodes being occupied with services, so causing a deadlock")
-        addOptionFn("--maxServiceJobs", dest="maxServiceJobs", default=None,
+        addOptionFn("--maxServiceJobs", dest="maxServiceJobs", default=None, type=int,
                     help=(
                     "The maximum number of service jobs that can be run concurrently, excluding service jobs running on preemptable nodes. default=%s" % config.maxServiceJobs))
-        addOptionFn("--maxPreemptableServiceJobs", dest="maxPreemptableServiceJobs", default=None,
+        addOptionFn("--maxPreemptableServiceJobs", dest="maxPreemptableServiceJobs", default=None, type=int,
                     help=(
                     "The maximum number of service jobs that can run concurrently on preemptable nodes. default=%s" % config.maxPreemptableServiceJobs))
-        addOptionFn("--deadlockWait", dest="deadlockWait", default=None,
+        addOptionFn("--deadlockWait", dest="deadlockWait", default=None, type=int,
                     help=(
-                    "The minimum number of seconds to observe the cluster stuck running only the same service jobs before throwing a deadlock exception. default=%s" % config.deadlockWait))
-        addOptionFn("--statePollingWait", dest="statePollingWait", default=1,
+                    "Time, in seconds, to tolerate the workflow running only the same service "
+                    "jobs, with no jobs to use them, before declaring the workflow to be "
+                    "deadlocked and stopping. default=%s" % config.deadlockWait))
+        addOptionFn("--deadlockCheckInterval", dest="deadlockCheckInterval", default=None, type=int,
+                    help=(
+                    "Time, in seconds, to wait between checks to see if the workflow is stuck "
+                    "running only service jobs, with no jobs to use them. Should be shorter than "
+                    "--deadlockWait. May need to be increased if the batch system cannot "
+                    "enumerate running jobs quickly enough, or if polling for running jobs is "
+                    "placing an unacceptable load on a shared cluster. default=%s" %
+                    config.deadlockCheckInterval))
+        addOptionFn("--statePollingWait", dest="statePollingWait", default=1, type=int,
                     help=("Time, in seconds, to wait before doing a scheduler query for job state. "
                           "Return cached results if within the waiting period."))
 
@@ -521,6 +542,11 @@ def _addOptions(addGroupFn, config):
     addOptionFn("--retryCount", dest="retryCount", default=None,
                 help=("Number of times to retry a failing job before giving up and "
                       "labeling job failed. default=%s" % config.retryCount))
+    addOptionFn("--enableUnlimitedPreemptableRetries", dest="enableUnlimitedPreemptableRetries",
+                action='store_true', default=False,
+                help=("If set, preemptable failures (or any failure due to an instance getting "
+                      "unexpectedly terminated) would not count towards job failures and "
+                      "--retryCount."))
     addOptionFn("--maxJobDuration", dest="maxJobDuration", default=None,
                 help=("Maximum runtime of a job (in seconds) before we kill it "
                       "(this is a lower bound, and the actual time before killing "
@@ -542,6 +568,11 @@ def _addOptions(addGroupFn, config):
     addOptionFn('--disableChaining', dest='disableChaining', action='store_true', default=False,
                 help="Disables chaining of jobs (chaining uses one job's resource allocation "
                 "for its successor job if possible).")
+    addOptionFn("--disableJobStoreChecksumVerification", dest="disableJobStoreChecksumVerification",
+                default=False, action="store_true",
+                help=("Disables checksum verification for files transferred to/from the job store. "
+                      "Checksum verification is a safety check to ensure the data is not corrupted "
+                      "during transfer. Currently only supported for non-streaming AWS files."))
     addOptionFn("--maxLogFileSize", dest="maxLogFileSize", default=None,
                 help=("The maximum size of a job log file to keep (in bytes), log files "
                       "larger than this will be truncated to the last X bytes. Setting "
@@ -572,9 +603,6 @@ def _addOptions(addGroupFn, config):
     addOptionFn("--sseKey", dest="sseKey", default=None,
                 help="Path to file containing 32 character key to be used for server-side encryption on "
                      "awsJobStore or googleJobStore. SSE will not be used if this flag is not passed.")
-    addOptionFn("--cseKey", dest="cseKey", default=None,
-                help="Path to file containing 256-bit key to be used for client-side encryption on "
-                     "azureJobStore. By default, no encryption is used.")
     addOptionFn("--setEnv", '-e', metavar='NAME=VALUE or NAME',
                 dest="environment", default=[], action="append",
                 help="Set an environment variable early on in the worker. If VALUE is omitted, "
@@ -590,6 +618,8 @@ def _addOptions(addGroupFn, config):
                 default=False,
                 help='Disables sanity checking the existence of the docker image specified by '
                 'TOIL_APPLIANCE_SELF, which Toil uses to provision mesos for autoscaling.')
+    addOptionFn('--disableProgress', dest='disableProgress', action='store_true', default=False,
+                help="Disables the progress bar shown when standard error is a terminal.")
     #
     # Debug options
     #
@@ -860,9 +890,6 @@ class Toil(object):
         elif name == 'aws':
             from toil.jobStores.aws.jobStore import AWSJobStore
             return AWSJobStore(rest)
-        elif name == 'azure':
-            from toil.jobStores.azureJobStore import AzureJobStore
-            return AzureJobStore(rest)
         elif name == 'google':
             from toil.jobStores.googleJobStore import GoogleJobStore
             return GoogleJobStore(rest)
@@ -921,7 +948,7 @@ class Toil(object):
                                '--disableCaching flag if you want to '
                                'use this batch system.' % config.batchSystem)
         logger.debug('Using the %s' %
-                    re.sub("([a-z])([A-Z])", "\g<1> \g<2>", batchSystemClass.__name__).lower())
+                    re.sub("([a-z])([A-Z])", r'\g<1> \g<2>', batchSystemClass.__name__).lower())
 
         return batchSystemClass(**kwargs)
 
@@ -949,7 +976,7 @@ class Toil(object):
                 else:
                     from toil.batchSystems.singleMachine import SingleMachineBatchSystem
                     if not isinstance(self._batchSystem, SingleMachineBatchSystem):
-                        logger.warn('Batch system does not support auto-deployment. The user '
+                        logger.warning('Batch system does not support auto-deployment. The user '
                                     'script %s will have to be present at the same location on '
                                     'every worker.', userScript)
                     userScript = None
@@ -1024,23 +1051,44 @@ class Toil(object):
         self._jobCache[job.jobStoreID] = job
 
     @staticmethod
-    def getWorkflowDir(workflowID, configWorkDir=None):
+    def getToilWorkDir(configWorkDir=None):
         """
-        Returns a path to the directory where worker directories and the cache will be located
-        for this workflow.
+        Returns a path to a writable directory under which per-workflow
+        directories exist.  This directory is always required to exist on a
+        machine, even if the Toil worker has not run yet.  If your workers and
+        leader have different temp directories, you may need to set
+        TOIL_WORKDIR.
 
-        :param str workflowID: Unique identifier for the workflow
         :param str configWorkDir: Value passed to the program using the --workDir flag
-        :return: Path to the workflow directory
+        :return: Path to the Toil work directory, constant across all machines
         :rtype: str
         """
+
         workDir = configWorkDir or os.getenv('TOIL_WORKDIR') or tempfile.gettempdir()
         if not os.path.exists(workDir):
             raise RuntimeError("The directory specified by --workDir or TOIL_WORKDIR (%s) does not "
                                "exist." % workDir)
-        # Create the workflow dir, make it unique to each host in case workDir is on a shared FS.
-        # This prevents workers on different nodes from erasing each other's directories.
-        workflowDir = os.path.join(workDir, 'toil-%s-%s' % (workflowID, getNodeID()))
+        return workDir
+
+    @classmethod
+    def getLocalWorkflowDir(cls, workflowID, configWorkDir=None):
+        """
+        Returns a path to the directory where worker directories and the cache will be located
+        for this workflow on this machine.
+
+        :param str workflowID: Unique identifier for the workflow
+        :param str configWorkDir: Value passed to the program using the --workDir flag
+        :return: Path to the local workflow directory on this machine
+        :rtype: str
+        """
+
+        # Get the global Toil work directory. This ensures that it exists.
+        base = cls.getToilWorkDir(configWorkDir=configWorkDir)
+
+        # Create a directory unique to each host and workflow in case workDir
+        # is on a shared FS. This prevents workers on different nodes from
+        # erasing each other's directories.
+        workflowDir = os.path.join(base, 'node-%s-%s' % (workflowID, getNodeID()))
         try:
             # Directory creation is atomic
             os.mkdir(workflowDir)
@@ -1049,7 +1097,7 @@ class Toil(object):
                 # The directory exists if a previous worker set it up.
                 raise
         else:
-            logger.debug('Created the workflow directory at %s' % workflowDir)
+            logger.debug('Created the workflow directory for this machine at %s' % workflowDir)
         return workflowDir
 
     def _runMainLoop(self, rootJob):
@@ -1148,7 +1196,7 @@ class ToilMetrics:
                                                self.mtailImage],
                                               stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         except subprocess.CalledProcessError:
-            logger.warn("Could not start toil metrics server.")
+            logger.warning("Could not start toil metrics server.")
             self.mtailProc = None
         except KeyboardInterrupt:
             self.mtailProc.terminate()
@@ -1170,7 +1218,7 @@ class ToilMetrics:
                                                           "-collector.filesystem.ignored-mount-points",
                                                           "^/(sys|proc|dev|host|etc)($|/)"])
             except subprocess.CalledProcessError:
-                logger.warn(
+                logger.warning(
                     "Couldn't start node exporter, won't get RAM and CPU usage for dashboard.")
                 self.nodeExporterProc = None
             except KeyboardInterrupt:
@@ -1211,7 +1259,7 @@ class ToilMetrics:
                                        "-d", "-p=3000:3000",
                                        self.grafanaImage])
         except subprocess.CalledProcessError:
-            logger.warn("Could not start prometheus/grafana dashboard.")
+            logger.warning("Could not start prometheus/grafana dashboard.")
             return
 
         # Add prometheus data source
@@ -1233,7 +1281,8 @@ class ToilMetrics:
 
     def log(self, message):
         if self.mtailProc:
-            self.mtailProc.stdin.write(message + "\n")
+            self.mtailProc.stdin.write((message + "\n").encode("utf-8"))
+            self.mtailProc.stdin.flush()
 
     # Note: The mtail configuration (dashboard/mtail/toil.mtail) depends on these messages
     # remaining intact

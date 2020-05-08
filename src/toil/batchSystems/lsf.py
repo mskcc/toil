@@ -24,7 +24,7 @@ from builtins import range
 from past.utils import old_div
 import logging
 import math
-from toil import subprocess
+from toil.lib.misc import call_command
 import os
 import traceback
 import json
@@ -55,16 +55,12 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
             with self.runningJobsLock:
                 currentjobs = dict((str(self.batchJobIDs[x][0]), x) for x in
                                    self.runningJobs)
-            process = subprocess.Popen(
-                    ["bjobs","-json","-o", "jobid stat start_time"],
-                    stdout=subprocess.PIPE)
-            stdout, _ = process.communicate()
 
-            output = stdout.decode('utf-8')
-            bjobs_records = self.parseBjobs(output)
+            stdout = call_command(["bjobs", "-json", "-o", "jobid stat start_time"])
+            bjobs_records = self.parseBjobs(stdout)
             if bjobs_records:
                 for single_item in bjobs_records:
-                    if single_item['STAT'] == 'RUN' and single_item['JOBID'] in currentjobs:
+                    if single_item['JOBID'] in currentjobs and single_item['STAT'] == 'RUN':
                         jobstart = parse(single_item['START_TIME'], default=datetime.now(tzlocal()))
                         times[currentjobs[single_item['JOBID']]] = datetime.now(tzlocal()) \
                         - jobstart
@@ -73,9 +69,9 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
 
 
         def killJob(self, jobID):
-            subprocess.check_call(['bkill', self.getBatchSystemID(jobID)])
+            call_command(['bkill', self.getBatchSystemID(jobID)])
 
-        def prepareSubmission(self, cpu, memory, jobID, command):
+        def prepareSubmission(self, cpu, memory, jobID, command, jobName):
             return self.prepareBsub(cpu, memory, jobID) + [command]
 
         def parseBjobs(self,bjobs_output_str):
@@ -101,17 +97,14 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
         def submitJob(self, subLine):
             combinedEnv = self.boss.environment
             combinedEnv.update(os.environ)
-            process = subprocess.Popen(subLine, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                       env=combinedEnv)
-            output = process.stdout.read().decode('utf-8')
-            logger.debug("BSUB: " + output)
-            result_str = re.search('Job <(.*)> is submitted', output)
+            stdout = call_command(subLine, env=combinedEnv)
+            result_str = re.search('Job <(.*)> is submitted', stdout)
 
             if result_str:
                 result = int(result_str.group(1))
                 logger.debug("Got the job id: {}".format(result))
             else:
-                logger.error("Could not submit job\nReason: {}".format(output))
+                logger.error("Could not submit job\nReason: {}".format(stdout))
                 temp_id = randint(10000000, 99999999)
                 result = "NOT_SUBMITTED_{}".format(temp_id)
             return result
@@ -130,10 +123,8 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                     "user exit_code stat exit_reason pend_reason", str(job)]
             logger.debug("Checking job exit code for job via bjobs: "
                          "{}".format(job))
-            process = subprocess.Popen(args, stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT)
-            output = process.stdout.read().decode('utf-8')
-            bjobs_records = self.parseBjobs(output)
+            stdout = call_command(args)
+            bjobs_records = self.parseBjobs(stdout)
             if bjobs_records:
                 process_output = bjobs_records[0]
                 if 'STAT' in process_output:
@@ -182,10 +173,8 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                          "{}".format(job))
 
             args = ["bacct", "-l", str(job)]
-            process = subprocess.Popen(args, stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT)
-            output = process.stdout.read().decode('utf-8')
-            process_output = output.split('\n')
+            stdout = call_command(args)
+            process_output = stdout.split('\n')
             for line in process_output:
                 if line.find("Completed <done>") > -1 or line.find("<DONE>") > -1:
                     logger.debug("Detected job completed for job: "
@@ -244,10 +233,8 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
 
     @classmethod
     def obtainSystemConstants(cls):
-        p = subprocess.Popen(["lshosts"], stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT)
-
-        line = p.stdout.readline().decode('utf-8')
+        stdout = call_command(["lshosts"])
+        line = stdout.split('\n')[0]
         items = line.strip().split()
         num_columns = len(items)
         cpu_index = None
@@ -259,27 +246,26 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                         mem_index = i
 
         if cpu_index is None or mem_index is None:
-                RuntimeError("lshosts command does not return ncpus or maxmem "
+                raise RuntimeError("lshosts command does not return ncpus or maxmem "
                              "columns")
-
-        # p.stdout.readline().decode('utf-8')
 
         maxCPU = 0
         maxMEM = MemoryString("0")
-        for line in p.stdout:
-            split_items = line.strip().split()
-            items = [item.decode('utf-8') for item in split_items if isinstance(item, bytes)]
+        for line in stdout.split('\n')[1:]:
+            items = line.strip().split()
+            if not items:
+                continue
             if len(items) < num_columns:
-                RuntimeError("lshosts output has a varying number of "
+                raise RuntimeError("lshosts output has a varying number of "
                              "columns")
             if items[cpu_index] != '-' and int(items[cpu_index]) > int(maxCPU):
-                maxCPU = items[cpu_index]
+                maxCPU = int(items[cpu_index])
             if (items[mem_index] != '-' and
                 MemoryString(items[mem_index]) > maxMEM):
                 maxMEM = MemoryString(items[mem_index])
 
         if maxCPU is 0 or maxMEM is 0:
-                RuntimeError("lshosts returns null ncpus or maxmem info")
+                raise RuntimeError("lshosts returns null ncpus or maxmem info")
         logger.debug("Got the maxMEM: {}".format(maxMEM))
         logger.debug("Got the maxCPU: {}".format(maxCPU))
 

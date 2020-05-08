@@ -29,6 +29,7 @@ import traceback
 import time
 import json
 import resource
+import subprocess
 
 try:
     from urllib2 import urlopen
@@ -38,8 +39,9 @@ except ImportError:
 import addict
 from pymesos import MesosExecutorDriver, Executor, decode_data, encode_data
 
-from toil import subprocess, pickle
+from toil import pickle
 from toil.lib.expando import Expando
+from toil.lib.threading import cpu_count
 from toil.batchSystems.abstractBatchSystem import BatchSystemSupport
 from toil.resource import Resource
 
@@ -76,8 +78,7 @@ class MesosExecutor(Executor):
         
         log.debug("Registered executor %s with framework", self.id)
         self.address = socket.gethostbyname(agentInfo.hostname)
-        nodeInfoThread = threading.Thread(target=self._sendFrameworkMessage, args=[driver])
-        nodeInfoThread.daemon = True
+        nodeInfoThread = threading.Thread(target=self._sendFrameworkMessage, args=[driver], daemon=True)
         nodeInfoThread.start()
 
     def reregistered(self, driver, agentInfo):
@@ -132,11 +133,11 @@ class MesosExecutor(Executor):
             else:
                 message.nodeInfo = dict(coresUsed=float(psutil.cpu_percent()) * .01,
                                         memoryUsed=float(psutil.virtual_memory().percent) * .01,
-                                        coresTotal=psutil.cpu_count(),
+                                        coresTotal=cpu_count(),
                                         memoryTotal=psutil.virtual_memory().total,
                                         workers=len(self.runningTasks))
             log.debug("Send framework message: %s", message)
-            driver.sendFrameworkMessage(encode_data(repr(message)))
+            driver.sendFrameworkMessage(encode_data(repr(message).encode('utf-8')))
             # Prevent workers launched together from repeatedly hitting the leader at the same time
             time.sleep(random.randint(45, 75))
 
@@ -228,7 +229,7 @@ class MesosExecutor(Executor):
 
             driver.sendStatusUpdate(update)
 
-        thread = threading.Thread(target=runTask)
+        thread = threading.Thread(target=runTask, daemon=True)
         thread.start()
 
     def frameworkMessage(self, driver, message):

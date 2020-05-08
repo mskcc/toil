@@ -29,7 +29,7 @@ import psutil
 
 import toil
 import toil.test.sort.sort
-from toil import subprocess
+import subprocess
 from toil import resolveEntryPoint
 from toil.job import Job
 from toil.utils.toilStatus import ToilStatus
@@ -39,6 +39,8 @@ from toil.test.sort.sortTest import makeFileToSort
 from toil.utils.toilStats import getStats, processData
 from toil.common import Toil, Config
 from toil.provisioners import clusterFactory
+from toil.version import python
+from mock import patch
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +67,7 @@ class UtilsTest(ToilTest):
             self.correctSort = fileHandle.readlines()
             self.correctSort.sort()
 
-        self.sort_workflow_cmd = ['python', '-m', 'toil.test.sort.sort',
+        self.sort_workflow_cmd = [python, '-m', 'toil.test.sort.sort',
                                   'file:' + self.toilDir,
                                   '--clean=never',
                                   '--numLines=1', '--lineLength=1']
@@ -168,7 +170,7 @@ class UtilsTest(ToilTest):
             for test in testStrings:
                 logger.debug('Testing SSH with special string: %s', test)
                 compareTo = "import sys; assert sys.argv[1]==%r" % test
-                leader.sshAppliance('python', '-', test, input=compareTo)
+                leader.sshAppliance(python, '-', test, input=compareTo)
 
             try:
                 leader.sshAppliance('nonsenseShouldFail')
@@ -177,11 +179,11 @@ class UtilsTest(ToilTest):
             else:
                 self.fail('The remote command failed silently where it should have raised an error')
 
-            leader.sshAppliance('python', '-c', "import os; assert os.environ['TOIL_WORKDIR']=='/var/lib/toil'")
+            leader.sshAppliance(python, '-c', "import os; assert os.environ['TOIL_WORKDIR']=='/var/lib/toil'")
 
             # `toil rsync-cluster`
             # Testing special characters - string.punctuation
-            fname = '!"#$%&\'()*+,-.;<=>:\ ?@[\\\\]^_`{|}~'
+            fname = r'!"#$%&\'()*+,-.;<=>:\ ?@[\\]^_`{|}~'
             testData = os.urandom(3 * (10**6))
             with tempfile.NamedTemporaryFile(suffix=fname) as tmpFile:
                 relpath = os.path.basename(tmpFile.name)
@@ -385,6 +387,23 @@ class UtilsTest(ToilTest):
         self.check_status('RUNNING', status_fn=ToilStatus.getStatus)
         wf.wait()
         self.check_status('COMPLETED', status_fn=ToilStatus.getStatus)
+
+    @needs_cwl
+    @patch('builtins.print')
+    def testPrintJobLog(self, mock_print):
+        """Test that ToilStatus.printJobLog() reads the log from a failed command without error."""
+        # Run a workflow that will always fail
+        cmd = ['toil-cwl-runner', '--jobStore', self.toilDir, '--clean=never',
+               'src/toil/test/cwl/alwaysfails.cwl', '--message', 'Testing']
+        wf = subprocess.Popen(cmd)
+        wf.wait()
+        # print log and check output
+        status = ToilStatus(self.toilDir)
+        status.printJobLog()
+        
+        # Make sure it printed some kind of complaint about the missing command.
+        args, kwargs = mock_print.call_args
+        self.assertIn('invalidcommand', args[0])
 
 
 def printUnicodeCharacter():

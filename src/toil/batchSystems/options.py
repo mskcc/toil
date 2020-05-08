@@ -13,11 +13,12 @@ from __future__ import absolute_import
 # See the License for the specific language governing permissions and
 #
 
+from toil.lib.threading import cpu_count
+
 from .registry import batchSystemFactoryFor, defaultBatchSystem, uniqueNames
 
 import socket
 from contextlib import closing
-import multiprocessing
 
 def getPublicIP():
     """Get the IP that this machine uses to contact the internet.
@@ -65,6 +66,13 @@ def _singleMachineOptions(addOptionFn, config):
             "When not specified and as long as caching is enabled, Toil will "
             "protect the file automatically by changing the permissions to "
             "read-only.")
+        addOptionFn(
+            "--noMoveExports", dest="moveExports", default=True,
+            action='store_false', help="When using a filesystem based job "
+            "store, output files are by default moved to the output directory, "
+            "and a symlink to the moved exported file is created at the initial location. "                           
+            "Specifying this option instead copies the files into the output "
+            "directory. Applies to filesystem-based job stores only.")
     else:
         addOptionFn(
             "--linkImports", dest="linkImports", default=False,
@@ -73,18 +81,27 @@ def _singleMachineOptions(addOptionFn, config):
             "this option saves space by sym-linking imported files. As long "
             "as caching is enabled Toil will protect the file "
             "automatically by changing the permissions to read-only.")
-
+        addOptionFn(
+            "--moveExports", dest="moveExports", default=False,
+            action='store_true', help="When using Toil's exportFile function "
+            "for staging, output files are copied to the output directory. Specifying "
+            "this option saves space by moving exported files, and making a symlink to "
+            "the exported file in the job store. Applies to filesystem-based job stores only.")
 
 def _mesosOptions(addOptionFn, config=None):
     addOptionFn("--mesosMaster", dest="mesosMasterAddress", default=getPublicIP() + ':5050',
                 help=("The host and port of the Mesos master separated by colon. (default: %(default)s)"))
 
+def _kubernetesOptions(addOptionFn, config=None):
+    addOptionFn("--kubernetesHostPath", dest="kubernetesHostPath", default=None,
+                help=("Path on Kubernetes hosts to use as shared inter-pod temp directory (default: %(default)s)"))
 
 # Built in batch systems that have options
 _options = [
     _parasolOptions,
     _singleMachineOptions,
-    _mesosOptions
+    _mesosOptions,
+    _kubernetesOptions
     ]
 
 
@@ -114,7 +131,7 @@ def addOptions(addOptionFn, config):
                 help=("Should auto-deployment of the user script be deactivated? If True, the user "
                       "script/package should be present at the same location on all workers. "
                       "default=false"))
-    localCores = multiprocessing.cpu_count()
+    localCores = cpu_count()
     addOptionFn("--maxLocalJobs", default=localCores,
                 help="For batch systems that support a local queue for "
                 "housekeeping jobs (Mesos, GridEngine, htcondor, lsf, slurm, "
@@ -146,16 +163,22 @@ def setDefaultOptions(config):
     config.disableAutoDeployment = False
     config.environment = {}
     config.statePollingWait = None  # if not set, will default to seconds in getWaitDuration()
-    config.maxLocalJobs = multiprocessing.cpu_count()
+    config.maxLocalJobs = cpu_count()
     config.manualMemArgs = False
-
-    # single machine
-    config.scale = 1
-    config.linkImports = False
-
-    # mesos
-    config.mesosMasterAddress = '%s:5050' % getPublicIP()
 
     # parasol
     config.parasolCommand = 'parasol'
     config.parasolMaxBatches = 10000
+
+    # single machine
+    config.scale = 1
+    config.linkImports = False
+    config.moveExports = False
+
+    # mesos
+    config.mesosMasterAddress = '%s:5050' % getPublicIP()
+    
+    # Kubernetes
+    config.kubernetesHostPath = None
+
+    

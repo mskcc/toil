@@ -13,35 +13,23 @@
 # limitations under the License.
 
 from __future__ import absolute_import, print_function
+
 from future import standard_library
+
 standard_library.install_aliases()
-from builtins import map
-from builtins import str
-from builtins import range
 from builtins import object
 from abc import abstractmethod, ABCMeta
 from contextlib import contextmanager
-from fcntl import flock, LOCK_EX, LOCK_UN
-from functools import partial
-from hashlib import sha1
-from threading import Thread, Semaphore, Event
+from threading import Semaphore, Event
 from future.utils import with_metaclass
-from six.moves.queue import Empty, Queue
-import base64
 import dill
-import errno
 import logging
 import os
-import shutil
-import stat
 import tempfile
-import time
-import uuid
 
 from toil.lib.objects import abstractclassmethod
-from toil.lib.humanize import bytes2human
-from toil.common import cacheDirName, getDirSizeRecursively, getFileSystemSize
-from toil.lib.bioio import makePublicDir
+from toil.lib.misc import WriteWatchingStream
+from toil.common import cacheDirName
 
 from toil.fileStores import FileID
 
@@ -85,7 +73,8 @@ class AbstractFileStore(with_metaclass(ABCMeta, object)):
         :param toil.jobGraph.JobGraph jobGraph: the job graph object for the currently
                running job.
         :param str localTempDir: the per-worker local temporary directory, under which
-               per-job directories will be created.
+               per-job directories will be created. Assumed to be inside the
+               workflow directory, which is assumed to be inside the work directory.
 
         :param waitForPreviousCommit: the waitForCommit method of the previous job's file
                store, when jobs are running in sequence on the same worker. Used to
@@ -98,12 +87,14 @@ class AbstractFileStore(with_metaclass(ABCMeta, object)):
         self.jobGraph = jobGraph
         self.localTempDir = os.path.abspath(localTempDir)
         self.workFlowDir = os.path.dirname(self.localTempDir)
+        self.workDir = os.path.dirname(self.localTempDir)
         self.jobName = self.jobGraph.command.split()[1]
         self.waitForPreviousCommit = waitForPreviousCommit
         self.loggingMessages = []
         # Records file IDs of files deleted during the current job. Doesn't get
         # committed back until the job is completely successful, because if the
         # job is re-run it will need to be able to re-delete these files.
+        # This is a set of str objects, not FileIDs.
         self.filesToDelete = set()
         # Records IDs of jobs that need to be deleted when the currently
         # running job is cleaned up.
@@ -240,7 +231,8 @@ class AbstractFileStore(with_metaclass(ABCMeta, object)):
             
             # When the stream is written to, count the bytes
             def handle(numBytes):
-                fileID.size += numBytes 
+                # No scope problem here, because we don't assign to a fileID local
+                fileID.size += numBytes
             wrappedStream.onWrite(handle)
             
             yield wrappedStream, fileID
@@ -259,7 +251,7 @@ class AbstractFileStore(with_metaclass(ABCMeta, object)):
         The destination file must not be deleted by the user; it can only be
         deleted through deleteLocalFile.
 
-        :param toil.fileStores.FileID fileStoreID: job store id for the file
+        :param toil.fileStores.FileID or str fileStoreID: job store id for the file
         :param string userPath: a path to the name of file to which the global file will be copied
                or hard-linked (see below).
         :param bool cache: Described in :func:`toil.fileStores.CachingFileStore.readGlobalFile`
@@ -279,6 +271,33 @@ class AbstractFileStore(with_metaclass(ABCMeta, object)):
         """
         raise NotImplementedError()
 
+    def getGlobalFileSize(self, fileStoreID):
+        """
+        Get the size of the file pointed to by the given ID, in bytes.
+
+        If a FileID or something else with a non-None 'size' field, gets that.
+
+        Otherwise, asks the job store to poll the file's size.
+
+        Note that the job store may overestimate the file's size, for example
+        if it is encrypted and had to be augmented with an IV or other
+        encryption framing.
+
+        :param toil.fileStores.FileID or str fileStoreID: File ID for the file
+        :return: File's size in bytes, as stored in the job store
+        :rtype: int
+        """
+
+        # First try and see if the size is still attached
+        size = getattr(fileStoreID, 'size', None)
+
+        if size is None:
+            # It fell off
+            # Someone is mixing FileStore and JobStore file APIs, or serializing FileIDs as strings.
+            size = self.jobStore.getFileSize(fileStoreID)
+
+        return size
+
     @abstractmethod
     def deleteLocalFile(self, fileStoreID):
         """
@@ -290,7 +309,7 @@ class AbstractFileStore(with_metaclass(ABCMeta, object)):
         ID, if it was written by the current job from the job's
         file-store-provided temp directory.
 
-        :param str fileStoreID: File Store ID of the file to be deleted.
+        :param toil.fileStores.FileID or str fileStoreID: File Store ID of the file to be deleted.
         """
         raise NotImplementedError()
 
@@ -301,7 +320,7 @@ class AbstractFileStore(with_metaclass(ABCMeta, object)):
         the job store. To ensure that the job can be restarted if necessary, the delete will not
         happen until after the job's run method has completed.
 
-        :param fileStoreID: the job store ID of the file to be deleted.
+        :param toil.fileStores.FileID or str fileStoreID: the File Store ID of the file to be deleted.
         """
         raise NotImplementedError()
 
@@ -419,29 +438,6 @@ class AbstractFileStore(with_metaclass(ABCMeta, object)):
         """
         raise NotImplementedError()
 
-    # Utility function used to identify if a pid is still running on the node.
-    @staticmethod
-    def _pidExists(pid):
-        """
-        This will return True if the process associated with pid is still running on the machine.
-        This is based on stackoverflow question 568271.
-
-        :param int pid: ID of the process to check for
-        :return: True/False
-        :rtype: bool
-        """
-        assert pid > 0
-        try:
-            os.kill(pid, 0)
-        except OSError as err:
-            if err.errno == errno.ESRCH:
-                # ESRCH == No such process
-                return False
-            else:
-                raise
-        else:
-            return True
-
     @abstractclassmethod
     def shutdown(cls, dir_):
         """
@@ -456,61 +452,4 @@ class AbstractFileStore(with_metaclass(ABCMeta, object)):
         raise NotImplementedError()
 
 
-class WriteWatchingStream(object):
-    """
-    A stream wrapping class that calls any functions passed to onWrite() with the number of bytes written for every write.
-    
-    Not seekable.
-    """
-    
-    def __init__(self, backingStream):
-        """
-        Wrap the given backing stream.
-        """
-        
-        self.backingStream = backingStream
-        # We have no write listeners yet
-        self.writeListeners = []
-        
-    def onWrite(self, listener):
-        """
-        Call the given listener with the number of bytes written on every write.
-        """
-        
-        self.writeListeners.append(listener)
-        
-    # Implement the file API from https://docs.python.org/2.4/lib/bltin-file-objects.html
-        
-    def write(self, data):
-        """
-        Write the given data to the file.
-        """
-        
-        # Do the write
-        self.backingStream.write(data)
-        
-        for listener in self.writeListeners:
-            # Send out notifications
-            listener(len(data))
-            
-    def writelines(self, datas):
-        """
-        Write each string from the given iterable, without newlines.
-        """
-        
-        for data in datas:
-            self.write(data)
-            
-    def flush(self):
-        """
-        Flush the backing stream.
-        """
-        
-        self.backingStream.flush()
-        
-    def close(self):
-        """
-        Close the backing stream.
-        """
-        
-        self.backingStream.close()
+

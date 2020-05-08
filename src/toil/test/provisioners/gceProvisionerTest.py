@@ -11,10 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from builtins import str
 import logging
 import os
-from toil import subprocess
+
+import subprocess
+from toil.version import exactPython
 from abc import abstractmethod
 
 import pytest
@@ -127,7 +128,7 @@ class AbstractGCEAutoscaleTest(ToilTest):
 
         # --never-download prevents silent upgrades to pip, wheel and setuptools
         venv_command = ['virtualenv', '--system-site-packages', '--never-download',
-                        '/home/venv']
+                        '--python', exactPython, '/home/venv']
         self.sshUtil(venv_command)
 
         upgrade_command = ['/home/venv/bin/pip', 'install', 'setuptools==28.7.1']

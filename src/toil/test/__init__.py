@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from __future__ import absolute_import
-from builtins import next
-from builtins import str
+
+import datetime
 import logging
-import multiprocessing
 import os
 import re
 import shutil
@@ -25,23 +24,27 @@ import threading
 import time
 import unittest
 import uuid
-from future.utils import with_metaclass
 from abc import ABCMeta, abstractmethod
 from contextlib import contextmanager
 from inspect import getsource
+from shutil import which
 from textwrap import dedent
-from unittest.util import strclass
+
+import pytz
+from builtins import str
+from future.utils import with_metaclass
 from six import iteritems, itervalues
 from six.moves.urllib.request import urlopen
+from unittest.util import strclass
 
-from toil.lib.memoize import memoize
-from toil.lib.iterables import concat
-from toil.lib.threading import ExceptionalThread
-from toil.lib.misc import mkdir_p
-from toil.provisioners.aws import runningOnEC2
 from toil import subprocess
+from toil import toilPackageDirPath, applianceSelf, ApplianceImageNotFound
 from toil import which
-from toil import toilPackageDirPath, applianceSelf
+from toil.lib.iterables import concat
+from toil.lib.memoize import memoize
+from toil.lib.misc import mkdir_p
+from toil.lib.threading import ExceptionalThread, cpu_count
+from toil.provisioners.aws import runningOnEC2
 from toil.version import distVersion
 
 logging.basicConfig(level=logging.DEBUG)
@@ -63,6 +66,12 @@ class ToilTest(unittest.TestCase):
     """
     _tempBaseDir = None
     _tempDirs = None
+
+    def setup_method(self, method):
+        western = pytz.timezone('America/Los_Angeles')
+        california_time = western.localize(datetime.datetime.now())
+        timestamp = california_time.strftime("%b %d %Y %H:%M:%S:%f %Z")
+        print(f"\n\n[TEST] {strclass(self.__class__)}:{self._testMethodName} ({timestamp})\n\n")
 
     @classmethod
     def setUpClass(cls):
@@ -256,6 +265,7 @@ def needs_rsync3(test_item):
         return unittest.skip('rsync needs to be installed to run this test.')(test_item)
     return test_item
 
+
 def needs_aws_s3(test_item):
     """Use as a decorator before test classes or methods to run only if AWS S3 is usable."""
     # TODO: we just check for generic access to the AWS account
@@ -269,6 +279,7 @@ def needs_aws_s3(test_item):
     if not (boto_credentials or os.path.exists(os.path.expanduser('~/.aws/credentials')) or runningOnEC2()):
         return unittest.skip("Configure AWS credentials to include this test.")(test_item)
     return test_item
+
 
 def needs_aws_ec2(test_item):
     """Use as a decorator before test classes or methods to run only if AWS EC2 is usable."""
@@ -303,32 +314,6 @@ def needs_google(test_item):
     return test_item
 
 
-def needs_azure(test_item):
-    """Use as a decorator before test classes or methods to run only if Azure is usable."""
-    test_item = _mark_test('azure', test_item)
-    keyName = os.getenv('TOIL_AZURE_KEYNAME')
-    if not keyName:
-        return unittest.skip("Set TOIL_AZURE_KEYNAME to include this test.")(test_item)
-
-    try:
-        # noinspection PyUnresolvedReferences
-        import azure.storage
-    except ImportError:
-        return unittest.skip("Install Toil with the 'azure' extra to include this test.")(test_item)
-    else:
-        # check for the credentials file
-        from toil.jobStores.azureJobStore import credential_file_path
-        if not os.path.exists(os.path.expanduser(credential_file_path)):
-            # no file, check for environment variables
-            try:
-                from toil.jobStores.azureJobStore import _fetchAzureAccountKey
-                _fetchAzureAccountKey(keyName)
-            except:
-                 return unittest.skip("Configure %s with the access key for the '%s' storage account." %
-                                      (credential_file_path, keyName))(test_item)
-        return test_item
-
-
 def needs_gridengine(test_item):
     """Use as a decorator before test classes or methods to run only if GridEngine is installed."""
     test_item = _mark_test('gridengine', test_item)
@@ -344,6 +329,7 @@ def needs_torque(test_item):
         return test_item
     return unittest.skip("Install PBS/Torque to include this test.")(test_item)
 
+
 def needs_kubernetes(test_item):
     """Use as a decorator before test classes or methods to run only if Kubernetes is installed."""
     test_item = _mark_test('kubernetes', test_item)
@@ -355,6 +341,7 @@ def needs_kubernetes(test_item):
     except TypeError:
         return unittest.skip("Configure Kubernetes (~/.kube/config) to include this test.")(test_item)
     return test_item
+
 
 def needs_mesos(test_item):
     """Use as a decorator before test classes or methods to run only if Mesos is installed."""
@@ -426,7 +413,6 @@ def needs_docker(test_item):
     else:
         return unittest.skip("Install docker to include this test.")(test_item)
 
-
 def needs_encryption(test_item):
     """
     Use as a decorator before test classes or methods to only run them if PyNaCl is installed
@@ -459,29 +445,47 @@ def needs_cwl(test_item):
 
 
 def needs_appliance(test_item):
-    import json
+    """
+    Use as a decorator before test classes or methods to only run them if
+    the Toil appliance Docker image is downloaded.
+    """
     test_item = _mark_test('appliance', test_item)
     if os.getenv('TOIL_SKIP_DOCKER', '').lower() == 'true':
         return unittest.skip('Skipping docker test.')(test_item)
-    if which('docker'):
-        image = applianceSelf()
-        try:
-            images = subprocess.check_output(['docker', 'inspect', image]).decode('utf-8')
-        except subprocess.CalledProcessError:
-            images = []
-        else:
-            images = {i['Id'] for i in json.loads(images) if image in i['RepoTags']}
-        if len(images) == 0:
-            return unittest.skip("Cannot find appliance image %s. Use 'make test' target to "
-                                 "automatically build appliance, or just run 'make docker' "
-                                 "prior to running this test." % image)(test_item)
-        elif len(images) == 1:
-            return test_item
-        else:
-            assert False, 'Expected `docker inspect` to return zero or one image.'
-    else:
-        return unittest.skip('Install Docker to include this test.')(test_item)
+    if not which('docker'):
+        return unittest.skip("Install docker to include this test.")(test_item)
 
+    try:
+        image = applianceSelf()
+        stdout, stderr = subprocess.Popen(['docker', 'inspect', '--format="{{json .RepoTags}}"', image],
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+        if image in stdout.decode("utf-8"):
+            return test_item
+    except:
+        pass
+
+    return unittest.skip(f"Cannot find appliance {image}. Use 'make test' target to automatically build appliance, or "
+                         f"just run 'make push_docker' prior to running this test.")(test_item)
+
+def needs_fetchable_appliance(test_item):
+    """
+    Use as a decorator before test classes or methods to only run them if
+    the Toil appliance Docker image is able to be downloaded from the Internet.
+    """
+
+    test_item = _mark_test('fetchable_appliance', test_item)
+    if os.getenv('TOIL_SKIP_DOCKER', '').lower() == 'true':
+        return unittest.skip('Skipping docker test.')(test_item)
+    try:
+        image = applianceSelf()
+    except ApplianceImageNotFound:
+        # Not downloadable
+        return unittest.skip(f"Cannot see appliance in registry. Use 'make test' target to automatically build appliance, or "
+                             f"just run 'make push_docker' prior to running this test.")(test_item)
+    else:
+        return test_item
+        
+    
 
 def integrative(test_item):
     """
@@ -599,18 +603,6 @@ def make_tests(generalMethod, targetClass, **kwargs):
     False
 
     """
-    def pop(d):
-        """
-        Pops an arbitrary key value pair from a given dict.
-
-        :param d: a dictionary
-
-        :return: the popped key, value tuple
-        """
-        k, v = next(iter(iteritems(kwargs)))
-        d.pop(k)
-        return k, v
-
     def permuteIntoLeft(left, rParamName, right):
         """
         Permutes values in right dictionary into each parameter: value dict pair in the left
@@ -732,7 +724,7 @@ class ApplianceTestSupport(ToilTest):
                  representing the respective appliance containers
         """
         if numCores is None:
-            numCores = multiprocessing.cpu_count()
+            numCores = cpu_count()
         # The last container to stop (and the first to start) should clean the mounts.
         with self.LeaderThread(self, mounts, cleanMounts=True) as leader:
             with self.WorkerThread(self, mounts, numCores) as worker:

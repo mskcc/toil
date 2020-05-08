@@ -25,10 +25,11 @@ from zipfile import ZipFile
 from toil.test import mkdir_p
 from mock import MagicMock, patch
 
-from toil import subprocess
+import subprocess
 from toil import inVirtualEnv
 from toil.resource import ModuleDescriptor, Resource, ResourceException
 from toil.test import ToilTest, tempFileContaining, travis_test
+from toil.version import exactPython
 
 
 class ResourceTest(ToilTest):
@@ -72,8 +73,10 @@ class ResourceTest(ToilTest):
         if virtualenv:
             self.assertTrue(inVirtualEnv())
             # --never-download prevents silent upgrades to pip, wheel and setuptools
-            subprocess.check_call(['virtualenv', '--never-download', dirPath])
-            sitePackages = os.path.join(dirPath, 'lib', 'python2.7', 'site-packages')
+            subprocess.check_call(['virtualenv', '--never-download', '--python', exactPython, dirPath])
+            sitePackages = os.path.join(dirPath, 'lib',
+                                        exactPython,
+                                        'site-packages')
             # tuple assignment is necessary to make this line immediately precede the try:
             oldPrefix, sys.prefix, dirPath = sys.prefix, dirPath, sitePackages
         else:

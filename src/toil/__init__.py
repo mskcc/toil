@@ -61,6 +61,7 @@ def which(cmd, mode=os.F_OK | os.X_OK, path=None):
     path.
 
     """
+
     # Check that a given file can be accessed with the correct mode.
     # Additionally check that `file` is not a directory, as on Windows
     # directories pass the os.access check.
@@ -128,7 +129,10 @@ def inVirtualEnv():
     """
     Returns whether we are inside a virtualenv or Conda virtual environment.
     """
-    return hasattr(sys, 'real_prefix') or 'CONDA_DEFAULT_ENV' in os.environ
+    return ('VIRTUAL_ENV' in os.environ or
+            'CONDA_DEFAULT_ENV' in os.environ or
+            hasattr(sys, 'real_prefix') or
+            (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix))
 
 
 def resolveEntryPoint(entryPoint):
@@ -171,7 +175,7 @@ def physicalMemory():
 def physicalDisk(config, toilWorkflowDir=None):
     if toilWorkflowDir is None:
         from toil.common import Toil
-        toilWorkflowDir = Toil.getWorkflowDir(config.workflowID, config.workDir)
+        toilWorkflowDir = Toil.getLocalWorkflowDir(config.workflowID, config.workDir)
     diskStats = os.statvfs(toilWorkflowDir)
     return diskStats.f_frsize * diskStats.f_bavail
 
@@ -267,7 +271,8 @@ def checkDockerImageExists(appliance):
     if registryName == 'docker.io':
         return requestCheckDockerIo(origAppliance=appliance, imageName=imageName, tag=tag)
     else:
-        return requestCheckRegularDocker(origAppliance=appliance, registryName=registryName, imageName=imageName, tag=tag)
+        return requestCheckRegularDocker(origAppliance=appliance, registryName=registryName, imageName=imageName,
+                                         tag=tag)
 
 
 def parseDockerAppliance(appliance):
@@ -291,14 +296,14 @@ def parseDockerAppliance(appliance):
     # get the tag
     if ':' in appliance:
         tag = appliance.split(':')[-1]
-        appliance = appliance[:-(len(':' + tag))] # remove only the tag
+        appliance = appliance[:-(len(':' + tag))]  # remove only the tag
     else:
         # default to 'latest' if no tag is specified
         tag = 'latest'
 
     # get the registry and image
-    registryName = 'docker.io' # default if not specified
-    imageName = appliance # will be true if not specified
+    registryName = 'docker.io'  # default if not specified
+    imageName = appliance  # will be true if not specified
     if '/' in appliance and '.' in appliance.split('/')[0]:
         registryName = appliance.split('/')[0]
         imageName = appliance[len(registryName):]
@@ -332,6 +337,7 @@ class ApplianceImageNotFound(ImageNotFound):
     :param str url: The URL at which the image's manifest is supposed to appear
     :param int statusCode: the failing HTTP status code returned by the URL
     """
+
     def __init__(self, origAppliance, url, statusCode):
         msg = ("The docker image that TOIL_APPLIANCE_SELF specifies (%s) produced "
                "a nonfunctional manifest URL (%s). The HTTP status returned was %s. "
@@ -367,7 +373,7 @@ def requestCheckRegularDocker(origAppliance, registryName, imageName, tag):
     :return: Return True if match found.  Raise otherwise.
     """
     ioURL = 'https://{webhost}/v2/{pathName}/manifests/{tag}' \
-              ''.format(webhost=registryName, pathName=imageName, tag=tag)
+            ''.format(webhost=registryName, pathName=imageName, tag=tag)
     response = requests.head(ioURL)
     if not response.ok:
         raise ApplianceImageNotFound(origAppliance, ioURL, response.status_code)
@@ -391,7 +397,8 @@ def requestCheckDockerIo(origAppliance, imageName, tag):
     if '/' not in imageName:
         imageName = 'library/' + imageName
 
-    token_url = 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull'.format(repo=imageName)
+    token_url = 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull'.format(
+        repo=imageName)
     requests_url = 'https://registry-1.docker.io/v2/{repo}/manifests/{tag}'.format(repo=imageName, tag=tag)
 
     token = requests.get(token_url)
@@ -410,25 +417,17 @@ def logProcessContext(config):
     from toil.version import version
     log.info("Running Toil version %s.", version)
     log.debug("Configuration: %s", config.__dict__)
-    
 
-def _monkey_patch_boto():
-    """
-    Boto 2 can't automatically assume roles. We want to replace its Provider
-    class that manages credentials with one that uses the Boto 3 configuration
-    and can assume roles.
-    """
-    
+
+try:
     from boto import provider
     from botocore.session import Session
     from botocore.credentials import create_credential_resolver, RefreshableCredentials, JSONFileCache
 
-    # We cache the final credentials so that we don't send multiple processes to
-    # simultaneously bang on the EC2 metadata server or ask for MFA pins from the
-    # user.
     cache_path = '~/.cache/aws/cached_temporary_credentials'
     datetime_format = "%Y-%m-%dT%H:%M:%SZ"  # incidentally the same as the format used by AWS
     log = logging.getLogger(__name__)
+
 
     # But in addition to our manual cache, we also are going to turn on boto3's
     # new built-in caching layer.
@@ -456,25 +455,33 @@ def _monkey_patch_boto():
         """
         return datetime.strptime(s, datetime_format)
 
+
     class BotoCredentialAdapter(provider.Provider):
         """
         Adapter to allow Boto 2 to use AWS credentials obtained via Boto 3's
         credential finding logic. This allows for automatic role assumption
         respecting the Boto 3 config files, even when parts of the app still use
         Boto 2.
-        
+
         This class also handles cacheing credentials in multi-process environments
         to avoid loads of processes swamping the EC2 metadata service.
         """
-        
+
+        """
+        Create a new BotoCredentialAdapter.
+        """
+
+        # TODO: We take kwargs because new boto2 versions have an 'anon'
+        # argument and we want to be future proof
+
         def __init__(self, name, access_key=None, secret_key=None,
-            security_token=None, profile_name=None, **kwargs):
+                     security_token=None, profile_name=None, **kwargs):
             """
             Create a new BotoCredentialAdapter.
             """
             # TODO: We take kwargs because new boto2 versions have an 'anon'
             # argument and we want to be future proof
-            
+
             if (name == 'aws' or name is None) and access_key is None and not kwargs.get('anon', False):
                 # We are on AWS and we don't have credentials passed along and we aren't anonymous.
                 # We will backend into a boto3 resolver for getting credentials.
@@ -484,18 +491,18 @@ def _monkey_patch_boto():
             else:
                 # We will use the normal flow
                 self._boto3_resolver = None
-            
+
             # Pass along all the arguments
             super(BotoCredentialAdapter, self).__init__(name, access_key=access_key,
-                secret_key=secret_key, security_token=security_token,
-                profile_name=profile_name, **kwargs)
-            
+                                                        secret_key=secret_key, security_token=security_token,
+                                                        profile_name=profile_name, **kwargs)
+
         def get_credentials(self, access_key=None, secret_key=None, security_token=None, profile_name=None):
             """
             Make sure our credential fields are populated. Called by the base class
             constructor.
             """
-            
+
             if self._boto3_resolver is not None:
                 # Go get the credentials from the cache, or from boto3 if not cached.
                 # We need to be eager here; having the default None
@@ -505,29 +512,30 @@ def _monkey_patch_boto():
                 # We're not on AWS, or they passed a key, or we're anonymous.
                 # Use the normal route; our credentials shouldn't expire.
                 super(BotoCredentialAdapter, self).get_credentials(access_key=access_key,
-                    secret_key=secret_key, security_token=security_token, profile_name=profile_name)
-            
+                                                                   secret_key=secret_key, security_token=security_token,
+                                                                   profile_name=profile_name)
+
         def _populate_keys_from_metadata_server(self):
             """
             This override is misnamed; it's actually the only hook we have to catch
             _credential_expiry_time being too soon and refresh the credentials. We
             actually just go back and poke the cache to see if it feels like
             getting us new credentials.
-            
+
             Boto 2 hardcodes a refresh within 5 minutes of expiry:
             https://github.com/boto/boto/blob/591911db1029f2fbb8ba1842bfcc514159b37b32/boto/provider.py#L247
-            
+
             Boto 3 wants to refresh 15 or 10 minutes before expiry:
             https://github.com/boto/botocore/blob/8d3ea0e61473fba43774eb3c74e1b22995ee7370/botocore/credentials.py#L279
-            
+
             So if we ever want to refresh, Boto 3 wants to refresh too.
             """
-            
+
             # This should only happen if we have expiring credentials, which we should only get from boto3
-            assert(self._boto3_resolver is not None)
-            
+            assert (self._boto3_resolver is not None)
+
             self._obtain_credentials_from_cache_or_boto3()
-        
+
         def _obtain_credentials_from_boto3(self):
             """
             We know the current cached credentials are not good, and that we
@@ -535,7 +543,7 @@ def _monkey_patch_boto():
             (_access_key, _secret_key, _security_token,
             _credential_expiry_time) from Boto 3.
             """
-            
+
             # We get a Credentials object
             # <https://github.com/boto/botocore/blob/8d3ea0e61473fba43774eb3c74e1b22995ee7370/botocore/credentials.py#L227>
             # or a RefreshableCredentials, or None on failure.
@@ -543,17 +551,17 @@ def _monkey_patch_boto():
             for attempt in retry(timeout=10, predicate=lambda _: True):
                 with attempt:
                     creds = self._boto3_resolver.load_credentials()
-                    
+
                     if creds is None:
                         try:
                             resolvers = str(self._boto3_resolver.providers)
                         except:
                             resolvers = "(Resolvers unavailable)"
                         raise RuntimeError("Could not obtain AWS credentials from Boto3. Resolvers tried: " + resolvers)
-            
+
             # Make sure the credentials actually has some credentials if it is lazy
             creds.get_frozen_credentials()
-            
+
             # Get when the credentials will expire, if ever
             if isinstance(creds, RefreshableCredentials):
                 # Credentials may expire.
@@ -562,21 +570,22 @@ def _monkey_patch_boto():
             else:
                 # Credentials never expire
                 self._credential_expiry_time = None
-            
+
             # Then, atomically get all the credentials bits. They may be newer than we think they are, but never older.
             frozen = creds.get_frozen_credentials()
-            
+
             # Copy them into us
             self._access_key = frozen.access_key
             self._secret_key = frozen.secret_key
             self._security_token = frozen.token
-        
+
         def _obtain_credentials_from_cache_or_boto3(self):
             """
             Get the cached credentials, or retrieve them from Boto 3 and cache them
             (or wait for another cooperating process to do so) if they are missing
             or not fresh enough.
             """
+            cache_path = '~/.cache/aws/cached_temporary_credentials'
             path = os.path.expanduser(cache_path)
             tmp_path = path + '.tmp'
             while True:
@@ -640,7 +649,8 @@ def _monkey_patch_boto():
                         if self._credential_expiry_time is None:
                             os.close(fd)
                             fd = None
-                            log.debug('Credentials are not temporary.  Leaving %s empty and renaming it to %s.', tmp_path, path)
+                            log.debug('Credentials are not temporary.  Leaving %s empty and renaming it to %s.',
+                                      tmp_path, path)
                             # No need to actually cache permanent credentials,
                             # because we hnow we aren't getting them from the
                             # metadata server or by assuming a role. Those both
@@ -660,13 +670,10 @@ def _monkey_patch_boto():
                     finally:
                         if fd is not None:
                             os.close(fd)
-                            
-    
-    # Now we have defined the adapter class. Patch the Boto module so it replaces the default Provider when Boto makes Providers.
+
+
     provider.Provider = BotoCredentialAdapter
-    
-# If Boto is around, try monkey-patching it as soon as anything in Toil loads
-try:
-    _monkey_patch_boto()
+
 except ImportError:
     pass
+

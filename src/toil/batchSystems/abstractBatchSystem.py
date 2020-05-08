@@ -16,6 +16,7 @@ from future import standard_library
 standard_library.install_aliases()
 from future.utils import with_metaclass
 from builtins import object
+import enum
 import os
 import shutil
 import logging
@@ -37,6 +38,25 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+UpdatedBatchJobInfo = namedtuple('UpdatedBatchJobInfo', (
+    'jobID',
+    # The exit status (integer value) of the job. 0 implies successful.
+    # EXIT_STATUS_UNAVAILABLE_VALUE is used when the exit status is not available (e.g. job is lost).
+    'exitStatus',
+    'exitReason',  # The exit reason, if available. One of BatchJobExitReason enum.
+    'wallTime'))
+
+
+class BatchJobExitReason(enum.Enum):
+    FINISHED = 1  # Successfully finished.
+    FAILED = 2  # Job finished, but failed.
+    LOST = 3  # Preemptable failure (job's executing host went away).
+    KILLED = 4  # Job killed before finishing.
+    ERROR = 5  # Internal error.
+
+
+# Value to use as exitStatus in UpdatedBatchJobInfo.exitStatus when status is not available.
+EXIT_STATUS_UNAVAILABLE_VALUE = 255
 
 # A class containing the information required for worker cleanup on shutdown of the batch system.
 WorkerCleanupInfo = namedtuple('WorkerCleanupInfo', (
@@ -110,7 +130,8 @@ class AbstractBatchSystem(with_metaclass(ABCMeta, object)):
     def killBatchJobs(self, jobIDs):
         """
         Kills the given job IDs. After returning, the killed jobs will not
-        appear in the results of getRunningBatchJobIDs.
+        appear in the results of getRunningBatchJobIDs. The killed job will not
+        be returned from getUpdatedBatchJob.
 
         :param jobIDs: list of IDs of jobs to kill
         :type jobIDs: list[int]
@@ -149,16 +170,39 @@ class AbstractBatchSystem(with_metaclass(ABCMeta, object)):
         Returns information about job that has updated its status (i.e. ceased
         running, either successfully or with an error). Each such job will be
         returned exactly once.
+        
+        Does not return info for jobs killed by killBatchJobs, although they
+        may cause None to be returned earlier than maxWait.
 
         :param float maxWait: the number of seconds to block, waiting for a result
 
-        :rtype: tuple(str, int, float) or None
-        :return: If a result is available, returns a tuple (jobID, exitValue, wallTime).
-                 Otherwise it returns None. wallTime is the number of seconds (a float) in
-                 wall-clock time the job ran for or None if this batch system does not support
-                 tracking wall time. Returns None for jobs that were killed.
+        :rtype: UpdatedBatchJobInfo or None
+        :return: If a result is available, returns UpdatedBatchJobInfo.
+                 Otherwise it returns None. wallTime is the number of seconds (a strictly 
+                 positive float) in wall-clock time the job ran for, or None if this
+                 batch system does not support tracking wall time.
         """
         raise NotImplementedError()
+        
+    def getSchedulingStatusMessage(self):
+        """
+        Get a log message fragment for the user about anything that might be
+        going wrong in the batch system, if available.
+        
+        If no useful message is available, return None.
+        
+        This can be used to report what resource is the limiting factor when
+        scheduling jobs, for example. If the leader thinks the workflow is
+        stuck, the message can be displayed to the user to help them diagnose
+        why it might be stuck.
+        
+        :rtype: str or None
+        :return: User-directed message about scheduling state.
+        """
+        
+        # Default implementation returns None.
+        # Override to provide scheduling status information.
+        return None
 
     @abstractmethod
     def shutdown(self):
@@ -229,7 +273,7 @@ class BatchSystemSupport(AbstractBatchSystem):
                                                    workflowID=self.config.workflowID,
                                                    cleanWorkDir=self.config.cleanWorkDir)
 
-    def checkResourceRequest(self, memory, cores, disk):
+    def checkResourceRequest(self, memory, cores, disk, name=None, detail=None):
         """
         Check resource request is not greater than that available or allowed.
 
@@ -238,6 +282,10 @@ class BatchSystemSupport(AbstractBatchSystem):
         :param float cores: number of cores being requested
 
         :param int disk: amount of disk space being requested, in bytes
+        
+        :param str name: Name of the job being checked, for generating a useful error report.
+        
+        :param str detail: Batch-system-specific message to include in the error.
 
         :raise InsufficientSystemResources: raised when a resource is requested in an amount
                greater than allowed
@@ -246,11 +294,14 @@ class BatchSystemSupport(AbstractBatchSystem):
         assert disk is not None
         assert cores is not None
         if cores > self.maxCores:
-            raise InsufficientSystemResources('cores', cores, self.maxCores)
+            raise InsufficientSystemResources('cores', cores, self.maxCores,
+                                              batchSystem=self.__class__.__name__, name=name, detail=detail)
         if memory > self.maxMemory:
-            raise InsufficientSystemResources('memory', memory, self.maxMemory)
+            raise InsufficientSystemResources('memory', memory, self.maxMemory,
+                                              batchSystem=self.__class__.__name__, name=name, detail=detail)
         if disk > self.maxDisk:
-            raise InsufficientSystemResources('disk', disk, self.maxDisk)
+            raise InsufficientSystemResources('disk', disk, self.maxDisk,
+                                              batchSystem=self.__class__.__name__, name=name, detail=detail)
 
     def setEnv(self, name, value=None):
         """
@@ -280,10 +331,12 @@ class BatchSystemSupport(AbstractBatchSystem):
 
     def formatStdOutErrPath(self, jobID, batchSystem, batchJobIDfmt, fileDesc):
         """
-        Format path for batch system standard output/error and other files.
+        Format path for batch system standard output/error and other files
+        generated by the batch system itself.
 
-        Files will be written to the Toil workflow directory with names containing
-        both the Toil and batch system job IDs, for ease of debugging job failures.
+        Files will be written to the Toil work directory (which may
+        be on a shared file system) with names containing both the Toil and
+        batch system job IDs, for ease of debugging job failures.
 
         :param: string jobID : Toil job ID
         :param: string batchSystem : Name of the batch system
@@ -299,10 +352,11 @@ class BatchSystemSupport(AbstractBatchSystem):
         if self.config.noStdOutErr:
             return os.devnull
 
-        workflowDir = Toil.getWorkflowDir(self.config.workflowID, self.config.workDir)
-        fileName = 'toil_job_{jobID}_batch_{batchSystem}_{batchJobIDfmt}_{fileDesc}.log'.format(
-            jobID=jobID, batchSystem=batchSystem, batchJobIDfmt=batchJobIDfmt, fileDesc=fileDesc)
-        return os.path.join(workflowDir, fileName)
+        workflowID = self.config.workflowID
+        workDir = Toil.getToilWorkDir(self.config.workDir)
+        fileName = 'toil_workflow_{workflowID}_job_{jobID}_batch_{batchSystem}_{batchJobIDfmt}_{fileDesc}.log'.format(
+            workflowID=workflowID, jobID=jobID, batchSystem=batchSystem, batchJobIDfmt=batchJobIDfmt, fileDesc=fileDesc)
+        return os.path.join(workDir, fileName)
 
     @staticmethod
     def workerCleanup(info):
@@ -313,7 +367,7 @@ class BatchSystemSupport(AbstractBatchSystem):
                for cleaning up the worker.
         """
         assert isinstance(info, WorkerCleanupInfo)
-        workflowDir = Toil.getWorkflowDir(info.workflowID, info.workDir)
+        workflowDir = Toil.getLocalWorkflowDir(info.workflowID, info.workDir)
         DeferredFunctionManager.cleanupWorker(workflowDir)
         workflowDirContents = os.listdir(workflowDir)
         AbstractFileStore.shutdownFileStore(workflowDir, info.workflowID)
@@ -492,7 +546,7 @@ class InsufficientSystemResources(Exception):
     To be raised when a job requests more of a particular resource than is either currently allowed
     or avaliable
     """
-    def __init__(self, resource, requested, available):
+    def __init__(self, resource, requested, available, batchSystem=None, name=None, detail=None):
         """
         Creates an instance of this exception that indicates which resource is insufficient for current
         demands, as well as the amount requested and amount actually available.
@@ -503,12 +557,37 @@ class InsufficientSystemResources(Exception):
                in this exception
 
         :param int|float available: amount of the particular resource actually available
+        
+        :param str batchSystem: Name of the batch system class complaining, for
+                   generating a useful error report. If you are using a single machine
+                   batch system for local jobs in another batch system, it is important to
+                   know which one has run out of resources.
+        
+        :param str name: Name of the job being checked, for generating a useful error report.
+        
+        :param str detail: Batch-system-specific message to include in the error.
         """
         self.requested = requested
         self.available = available
         self.resource = resource
+        self.batchSystem = batchSystem if batchSystem is not None else 'this batch system'
+        self.unit = 'bytes of ' if resource == 'disk' or resource == 'memory' else ''
+        self.name = name
+        self.detail = detail
 
     def __str__(self):
-        return 'Requesting more {} than either physically available, or enforced by --max{}. ' \
-               'Requested: {}, Available: {}'.format(self.resource, self.resource.capitalize(),
-                                                     self.requested, self.available)
+        if self.name is not None:
+            phrases = [('The job {} is requesting {} {}{}, more than '
+                        'the maximum of {} {}{} that {} was configured '
+                        'with.'.format(self.name, self.requested, self.unit, self.resource,
+                                       self.available, self.unit, self.resource, self.batchSystem))]
+        else:
+            phrases = [('Requesting more {} than either physically available to {}, or enforced by --max{}. '
+                        'Requested: {}, Available: {}'.format(self.resource, self.batchSystem,
+                                                              self.resource.capitalize(),
+                                                              self.requested, self.available))]
+        
+        if self.detail is not None:
+            phrases.append(self.detail)
+            
+        return ' '.join(phrases)

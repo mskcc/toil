@@ -14,17 +14,22 @@
 
 from __future__ import print_function
 import os
+import sys
 import textwrap
 
 applianceSelf = os.environ['TOIL_APPLIANCE_SELF']
 sdistName = os.environ['_TOIL_SDIST_NAME']
 
+# Make sure to install packages into the pip for the version of Python we are
+# building for.
+python = f'python{sys.version_info[0]}.{sys.version_info[1]}'
+pip = f'{python} -m pip'
 
-dependencies = ' '.join(['libffi-dev',  # For client side encryption for 'azure' extra with PyNACL
-                         'python3.6',
-                         'python3.6-dev',
-                         'python-dev',  # For installing Python packages with native code
-                         'python-pip',  # Bootstrap pip, but needs upgrading, see below
+
+dependencies = ' '.join(['libffi-dev',  # For client side encryption for extras with PyNACL
+                         python,
+                         f'{python}-dev',
+                         'python3.8-distutils' if python == 'python3.8' else '',
                          'python3-pip',
                          'libcurl4-openssl-dev',
                          'libssl-dev',
@@ -35,13 +40,15 @@ dependencies = ' '.join(['libffi-dev',  # For client side encryption for 'azure'
                          "nodejs",  # CWL support for javascript expressions
                          'rsync',
                          'screen',
-                         'build-essential', # We need a build environment to build Singularity 3.
+                         'build-essential',  # We need a build environment to build Singularity 3.
                          'uuid-dev',
                          'libgpgme11-dev',
                          'libseccomp-dev',
                          'pkg-config',
                          'squashfs-tools',
                          'cryptsetup',
+                         'less',
+                         'vim',
                          'git'])
 
 
@@ -56,7 +63,7 @@ motd = heredoc('''
     Run toil <workflow>.py --help to see all options for running your workflow.
     For more information see http://toil.readthedocs.io/en/latest/
 
-    Copyright (C) 2015-2018 Regents of the University of California
+    Copyright (C) 2015-2020 Regents of the University of California
 
     Version: {applianceSelf}
 
@@ -77,7 +84,7 @@ print(heredoc('''
         > /etc/apt/sources.list.d/nodesource.list \
         && apt-key adv --keyserver keyserver.ubuntu.com --recv 68576280
 
-    RUN add-apt-repository -y ppa:jonathonf/python-3.6
+    RUN add-apt-repository -y ppa:deadsnakes/ppa
     
     RUN apt-get -y update --fix-missing && \
         DEBIAN_FRONTEND=noninteractive apt-get -y upgrade && \
@@ -85,8 +92,9 @@ print(heredoc('''
         apt-get clean && \
         rm -rf /var/lib/apt/lists/*
 
-    RUN wget https://dl.google.com/go/go1.13.3.linux-amd64.tar.gz && \
-        tar xvf go1.13.3.linux-amd64.tar.gz && \
+    RUN wget -q https://dl.google.com/go/go1.13.3.linux-amd64.tar.gz && \
+        tar xf go1.13.3.linux-amd64.tar.gz && \
+        rm go1.13.3.linux-amd64.tar.gz && \
         mv go/bin/* /usr/bin/ && \
         mv go /usr/local/
         
@@ -109,17 +117,20 @@ print(heredoc('''
 
     RUN chmod 777 /usr/bin/waitForKey.sh && chmod 777 /usr/bin/customDockerInit.sh
     
+    # fixes an incompatibility updating pip on Ubuntu 16 w/ python3.8
+    RUN sed -i "s/platform.linux_distribution()/('Ubuntu', '16.04', 'xenial')/g" /usr/lib/python3/dist-packages/pip/download.py
+    
     # The stock pip is too old and can't install from sdist with extras
-    RUN pip install --upgrade pip==9.0.1
+    RUN {pip} install --upgrade pip==20.0.2
 
     # Default setuptools is too old
-    RUN pip install --upgrade setuptools==36.5.0
+    RUN {pip} install --upgrade setuptools==45
 
     # Include virtualenv, as it is still the recommended way to deploy pipelines
-    RUN pip install --upgrade virtualenv==15.0.3
+    RUN {pip} install --upgrade virtualenv==20.0.
 
     # Install s3am (--never-download prevents silent upgrades to pip, wheel and setuptools)
-    RUN virtualenv --never-download /home/s3am \
+    RUN virtualenv --python {python} --never-download /home/s3am \
         && /home/s3am/bin/pip install s3am==2.0 \
         && ln -s /home/s3am/bin/s3am /usr/local/bin/
 
@@ -129,14 +140,14 @@ print(heredoc('''
          && chmod u+x /usr/local/bin/docker
 
     # Fix for Mesos interface dependency missing on ubuntu
-    RUN pip install protobuf==3.0.0
+    RUN {pip} install protobuf==3.0.0
 
     # Fix for https://issues.apache.org/jira/browse/MESOS-3793
     ENV MESOS_LAUNCHER=posix
 
     # Fix for `screen` (https://github.com/BD2KGenomics/toil/pull/1386#issuecomment-267424561)
     ENV TERM linux
-    
+
     # Run bash instead of sh inside of screen
     ENV SHELL /bin/bash
     RUN echo "defshell -bash" > ~/.screenrc
@@ -151,7 +162,7 @@ print(heredoc('''
 
     # This component changes most frequently and keeping it last maximizes Docker cache hits.
     COPY {sdistName} .
-    RUN pip install {sdistName}[all]
+    RUN {pip} install {sdistName}[all]
     RUN rm {sdistName}
 
     # We intentionally inherit the default ENTRYPOINT and CMD from the base image, to the effect

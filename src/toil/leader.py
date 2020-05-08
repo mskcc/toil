@@ -26,6 +26,7 @@ from builtins import super
 import logging
 import time
 import os
+import sys
 import glob
 
 from toil.lib.humanize import bytes2human
@@ -35,7 +36,9 @@ try:
 except ImportError:
     # CWL extra not installed
     CWL_INTERNAL_JOBS = ()
+from toil.batchSystems.abstractBatchSystem import BatchJobExitReason
 from toil.jobStores.abstractJobStore import NoSuchJobException
+from toil.batchSystems import DeadlockException
 from toil.lib.throttle import LocalThrottle
 from toil.provisioners.clusterScaler import ScalerThread
 from toil.serviceManager import ServiceManager
@@ -43,6 +46,8 @@ from toil.statsAndLogging import StatsAndLogging
 from toil.job import JobNode, ServiceJobNode
 from toil.toilState import ToilState
 from toil.common import Toil, ToilMetrics
+
+import enlighten
 
 logger = logging.getLogger( __name__ )
 
@@ -69,32 +74,28 @@ logger = logging.getLogger( __name__ )
 
 class FailedJobsException(Exception):
     def __init__(self, jobStoreLocator, failedJobs, jobStore):
-        msg = "The job store '%s' contains %i failed jobs" % (jobStoreLocator, len(failedJobs))
+        self.msg = "The job store '%s' contains %i failed jobs" % (jobStoreLocator, len(failedJobs))
         try:
-            msg += ": %s" % ", ".join((str(failedJob) for failedJob in failedJobs))
+            self.msg += ": %s" % ", ".join((str(failedJob) for failedJob in failedJobs))
             for jobNode in failedJobs:
                 job = jobStore.load(jobNode.jobStoreID)
                 if job.logJobStoreFileID:
-                    msg += "\n=========> Failed job %s \n" % jobNode
                     with job.getLogFileHandle(jobStore) as fH:
-                        msg += fH.read().decode('utf-8')
-                    msg += "<=========\n"
+                        self.msg += "\n" + StatsAndLogging.formatLogStream(fH, jobNode)
         # catch failures to prepare more complex details and only return the basics
         except:
             logger.exception('Exception when compiling information about failed jobs')
+        self.msg = self.msg.rstrip('\n')
         super().__init__()
         self.jobStoreLocator = jobStoreLocator
         self.numberOfFailedJobs = len(failedJobs)
-
-####################################################
-# Exception thrown by the Leader class when a deadlock is encountered due to insufficient
-# resources to run the workflow
-####################################################
-
-class DeadlockException(Exception):
-    def __init__(self, msg):
-        msg = "Deadlock encountered: " + msg
-        super().__init__()
+    
+    def __str__(self):
+        """
+        Stringify the exception, including the message.
+        """
+        return self.msg
+    
 
 ####################################################
 ##Following class represents the leader
@@ -180,72 +181,94 @@ class Leader(object):
         self.debugJobNames = ("CWLJob", "CWLWorkflow", "CWLScatter", "CWLGather",
                               "ResolveIndirect")
 
-        self.deadlockThrottler = LocalThrottle(self.config.deadlockWait)
+        self.deadlockThrottler = LocalThrottle(self.config.deadlockCheckInterval)
+        
+        self.statusThrottler = LocalThrottle(self.config.statusWait)
+        
+        # For fancy console UI, we use an Enlighten counter that displays running / queued jobs
+        # This gets filled in in run() and updated periodically.
+        self.progress_overall = None
+        # Also count failed/killed jobs
+        self.progress_failed = None
+        # Assign colors for them
+        self.GOOD_COLOR = (0, 60, 108)
+        self.BAD_COLOR = (253, 199, 0)
+        # And set a format that shows failures
+        self.PROGRESS_BAR_FORMAT = ('{desc}{desc_pad}{percentage:3.0f}%|{bar}| {count:{len_total}d}/{total:d} '
+                                    '({count_1:d} failures) [{elapsed}<{eta}, {rate:.2f}{unit_pad}{unit}/s]')
+        
+        # TODO: No way to set background color on the terminal for the bar.
 
     def run(self):
         """
         This runs the leader process to issue and manage jobs.
 
-        :raises: toil.leader.FailedJobsException if at the end of function their remain \
-        failed jobs
+        :raises: toil.leader.FailedJobsException if failed jobs remain after running.
 
         :return: The return value of the root job's run function.
         :rtype: Any
         """
-        # Start the stats/logging aggregation thread
-        self.statsAndLogging.start()
-        if self.config.metrics:
-            self.toilMetrics = ToilMetrics(provisioner=self.provisioner)
+        
+        with enlighten.get_manager(stream=sys.stderr, enabled=not self.config.disableProgress) as manager:
+            # Set up the fancy console UI if desirable
+            self.progress_overall = manager.counter(total=0, desc='Workflow Progress', unit='jobs',
+                                                    color=self.GOOD_COLOR, bar_format=self.PROGRESS_BAR_FORMAT)
+            self.progress_failed = self.progress_overall.add_subcounter(self.BAD_COLOR)
+        
+            # Start the stats/logging aggregation thread
+            self.statsAndLogging.start()
+            if self.config.metrics:
+                self.toilMetrics = ToilMetrics(provisioner=self.provisioner)
 
-        try:
-
-            # Start service manager thread
-            self.serviceManager.start()
             try:
 
-                # Create cluster scaling processes if not None
-                if self.clusterScaler is not None:
-                    self.clusterScaler.start()
-
+                # Start service manager thread
+                self.serviceManager.start()
                 try:
-                    # Run the main loop
-                    self.innerLoop()
-                finally:
+
+                    # Create cluster scaling processes if not None
                     if self.clusterScaler is not None:
-                        logger.debug('Waiting for workers to shutdown.')
-                        startTime = time.time()
-                        self.clusterScaler.shutdown()
-                        logger.debug('Worker shutdown complete in %s seconds.', time.time() - startTime)
+                        self.clusterScaler.start()
+
+                    try:
+                        # Run the main loop
+                        self.innerLoop()
+                    finally:
+                        if self.clusterScaler is not None:
+                            logger.debug('Waiting for workers to shutdown.')
+                            startTime = time.time()
+                            self.clusterScaler.shutdown()
+                            logger.debug('Worker shutdown complete in %s seconds.', time.time() - startTime)
+
+                finally:
+                    # Ensure service manager thread is properly shutdown
+                    self.serviceManager.shutdown()
 
             finally:
-                # Ensure service manager thread is properly shutdown
-                self.serviceManager.shutdown()
+                # Ensure the stats and logging thread is properly shutdown
+                self.statsAndLogging.shutdown()
+                if self.toilMetrics:
+                    self.toilMetrics.shutdown()
 
-        finally:
-            # Ensure the stats and logging thread is properly shutdown
-            self.statsAndLogging.shutdown()
-            if self.toilMetrics:
-                self.toilMetrics.shutdown()
+            # Filter the failed jobs
+            self.toilState.totalFailedJobs = [j for j in self.toilState.totalFailedJobs if self.jobStore.exists(j.jobStoreID)]
 
-        # Filter the failed jobs
-        self.toilState.totalFailedJobs = [j for j in self.toilState.totalFailedJobs if self.jobStore.exists(j.jobStoreID)]
+            try:
+                self.create_status_sentinel_file(self.toilState.totalFailedJobs)
+            except IOError as e:
+                logger.debug('Error from importFile with hardlink=True: {}'.format(e))
 
-        try:
-            self.create_status_sentinel_file(self.toilState.totalFailedJobs)
-        except IOError as e:
-            logger.debug('Error from importFile with hardlink=True: {}'.format(e))
+            logger.info("Finished toil run %s" %
+                         ("successfully." if not self.toilState.totalFailedJobs \
+                    else ("with %s failed jobs." % len(self.toilState.totalFailedJobs))))
 
-        logger.info("Finished toil run %s" %
-                     ("successfully." if not self.toilState.totalFailedJobs \
-                else ("with %s failed jobs." % len(self.toilState.totalFailedJobs))))
+            if len(self.toilState.totalFailedJobs):
+                logger.info("Failed jobs at end of the run: %s", ' '.join(str(job) for job in self.toilState.totalFailedJobs))
+            # Cleanup
+            if len(self.toilState.totalFailedJobs) > 0:
+                raise FailedJobsException(self.config.jobStore, self.toilState.totalFailedJobs, self.jobStore)
 
-        if len(self.toilState.totalFailedJobs):
-            logger.info("Failed jobs at end of the run: %s", ' '.join(str(job) for job in self.toilState.totalFailedJobs))
-        # Cleanup
-        if len(self.toilState.totalFailedJobs) > 0:
-            raise FailedJobsException(self.config.jobStore, self.toilState.totalFailedJobs, self.jobStore)
-
-        return self.jobStore.getRootJobReturnValue()
+            return self.jobStore.getRootJobReturnValue()
 
     def create_status_sentinel_file(self, fail):
         """Create a file in the jobstore indicating failure or success."""
@@ -369,7 +392,7 @@ class Leader(object):
             # been tried once (without decreasing its retry count as the job
             # itself was successful), and its subtree failed, it shouldn't be retried
             # unless it has more than 1 try.
-            logger.warn('Job: %s is being restarted as a checkpoint after the total '
+            logger.warning('Job: %s is being restarted as a checkpoint after the total '
                         'failure of jobs in its subtree.', jobGraph.jobStoreID)
             self.issueJob(JobNode.fromJobGraph(jobGraph))
         else:
@@ -401,7 +424,7 @@ class Leader(object):
             if (jobGraph.remainingRetryCount == 0
                 or isServiceJob and not self.jobStore.fileExists(jobGraph.errorJobStoreID)):
                 self.processTotallyFailedJob(jobGraph)
-                logger.warn("Job %s with ID %s is completely failed",
+                logger.warning("Job %s with ID %s is completely failed",
                             jobGraph, jobGraph.jobStoreID)
             else:
                 # Otherwise try the job again
@@ -444,7 +467,7 @@ class Leader(object):
                 logger.debug("Job: %s is empty, we are scheduling to clean it up", jobGraph.jobStoreID)
             else:
                 self.processTotallyFailedJob(jobGraph)
-                logger.warn("Job: %s is empty but completely failed - something is very wrong", jobGraph.jobStoreID)
+                logger.warning("Job: %s is empty but completely failed - something is very wrong", jobGraph.jobStoreID)
 
     def _processReadyJobs(self):
         """Process jobs that are ready to be scheduled/have successors to schedule"""
@@ -480,24 +503,26 @@ class Leader(object):
 
     def _gatherUpdatedJobs(self, updatedJobTuple):
         """Gather any new, updated jobGraph from the batch system"""
-        jobID, result, wallTime = updatedJobTuple
+        jobID, exitStatus, exitReason, wallTime = (
+            updatedJobTuple.jobID, updatedJobTuple.exitStatus, updatedJobTuple.exitReason,
+            updatedJobTuple.wallTime)
         # easy, track different state
         try:
             updatedJob = self.jobBatchSystemIDToIssuedJob[jobID]
         except KeyError:
-            logger.warn("A result seems to already have been processed "
+            logger.warning("A result seems to already have been processed "
                         "for job %s", jobID)
         else:
-            if result == 0:
+            if exitStatus == 0:
                 cur_logger = (logger.debug if str(updatedJob.jobName).startswith(CWL_INTERNAL_JOBS)
                               else logger.info)
                 cur_logger('Job ended: %s', updatedJob)
                 if self.toilMetrics:
                     self.toilMetrics.logCompletedJob(updatedJob)
             else:
-                logger.warn('Job failed with exit value %i: %s',
-                            result, updatedJob)
-            self.processFinishedJob(jobID, result, wallTime=wallTime)
+                logger.warning('Job failed with exit value %i: %s',
+                               exitStatus, updatedJob)
+            self.processFinishedJob(jobID, exitStatus, wallTime=wallTime, exitReason=exitReason)
 
     def _processLostJobs(self):
         """Process jobs that have gone awry"""
@@ -509,7 +534,6 @@ class Leader(object):
             # We only rescue jobs every N seconds, and when we have apparently
             # exhausted the current jobGraph supply
             self.reissueOverLongJobs()
-            logger.info("Reissued any over long jobs")
 
             hasNoMissingJobs = self.reissueMissingJobs()
             if hasNoMissingJobs:
@@ -517,8 +541,6 @@ class Leader(object):
             else:
                 # This means we'll try again in a minute, providing things are quiet
                 self.timeSinceJobsLastRescued += 60
-            logger.debug("Rescued any (long) missing jobs")
-
 
     def innerLoop(self):
         """
@@ -542,6 +564,7 @@ class Leader(object):
             if updatedJobTuple is not None:
                 self._gatherUpdatedJobs(updatedJobTuple)
             else:
+                # If nothing is happening, see if any jobs have wandered off
                 self._processLostJobs()
 
             # Check on the associated threads and exit if a failure is detected
@@ -550,11 +573,18 @@ class Leader(object):
             # the cluster scaler object will only be instantiated if autoscaling is enabled
             if self.clusterScaler is not None:
                 self.clusterScaler.check()
-
+            
             if len(self.toilState.updatedJobs) == 0 and self.deadlockThrottler.throttle(wait=False):
                 # Nothing happened this round and it's been long
                 # enough since we last checked. Check for deadlocks.
                 self.checkForDeadlocks()
+                
+            if self.statusThrottler.throttle(wait=False):
+                # Time to tell the user how things are going
+                self._reportWorkflowStatus()
+                
+            # Make sure to keep elapsed time and ETA up to date even when no jobs come in
+            self.progress_overall.update(incr=0)
 
         logger.debug("Finished the main loop: no jobs left to run.")
 
@@ -571,28 +601,66 @@ class Leader(object):
         """
         Checks if the system is deadlocked running service jobs.
         """
+        
         totalRunningJobs = len(self.batchSystem.getRunningBatchJobIDs())
         totalServicesIssued = self.serviceJobsIssued + self.preemptableServiceJobsIssued
+        
         # If there are no updated jobs and at least some jobs running
         if totalServicesIssued >= totalRunningJobs and totalRunningJobs > 0:
             serviceJobs = [x for x in list(self.jobBatchSystemIDToIssuedJob.keys()) if isinstance(self.jobBatchSystemIDToIssuedJob[x], ServiceJobNode)]
             runningServiceJobs = set([x for x in serviceJobs if self.serviceManager.isRunning(self.jobBatchSystemIDToIssuedJob[x])])
             assert len(runningServiceJobs) <= totalRunningJobs
-
+            
             # If all the running jobs are active services then we have a potential deadlock
             if len(runningServiceJobs) == totalRunningJobs:
-                # We wait self.config.deadlockWait seconds before declaring the system deadlocked
+                # There could be trouble; we are 100% services.
+                # See if the batch system has anything to say for itself about its failure to run our jobs.
+                message = self.batchSystem.getSchedulingStatusMessage()
+                if message is not None:
+                    # Prepend something explaining the message
+                    message = "The batch system reports: {}".format(message)
+                else:
+                    # Use a generic message if none is available
+                    message = "Cluster may be too small."
+                    
+            
+                # See if this is a new potential deadlock
                 if self.potentialDeadlockedJobs != runningServiceJobs:
+                    logger.warning(("Potential deadlock detected! All %s running jobs are service jobs, "
+                                    "with no normal jobs to use them! %s"), totalRunningJobs, message)
                     self.potentialDeadlockedJobs = runningServiceJobs
                     self.potentialDeadlockTime = time.time()
-                elif time.time() - self.potentialDeadlockTime >= self.config.deadlockWait:
-                    raise DeadlockException("The system is service deadlocked - all %d running jobs are active services" % totalRunningJobs)
+                else:
+                    # We wait self.config.deadlockWait seconds before declaring the system deadlocked
+                    stuckFor = time.time() - self.potentialDeadlockTime
+                    if stuckFor >= self.config.deadlockWait:
+                        logger.error("We have been deadlocked since %s on these service jobs: %s",
+                                     self.potentialDeadlockTime, self.potentialDeadlockedJobs)
+                        raise DeadlockException(("The workflow is service deadlocked - all %d running jobs "
+                                                 "have been the same active services for at least %s seconds") % (totalRunningJobs, self.config.deadlockWait))
+                    else:
+                        # Complain that we are still stuck.
+                        waitingNormalJobs = self.getNumberOfJobsIssued() - totalServicesIssued
+                        logger.warning(("Potentially deadlocked for %.0f seconds. Waiting at most %.0f more seconds "
+                                        "for any of %d issued non-service jobs to schedule and start. %s"),
+                                       stuckFor, self.config.deadlockWait - stuckFor, waitingNormalJobs, message)
             else:
                 # We have observed non-service jobs running, so reset the potential deadlock
+                
+                if len(self.potentialDeadlockedJobs) > 0:
+                    # We thought we had a deadlock. Tell the user it is fixed.
+                    logger.warning("Potential deadlock has been resolved; non-service jobs are now running.")
+                
                 self.potentialDeadlockedJobs = set()
                 self.potentialDeadlockTime = 0
         else:
-            # We have observed non-service jobs running, so reset the potential deadlock
+            # We have observed non-service jobs running, so reset the potential deadlock.
+            # TODO: deduplicate with above
+            
+            if len(self.potentialDeadlockedJobs) > 0:
+                # We thought we had a deadlock. Tell the user it is fixed.
+                logger.warning("Potential deadlock has been resolved; non-service jobs are now running.")
+            
             self.potentialDeadlockedJobs = set()
             self.potentialDeadlockTime = 0
 
@@ -617,6 +685,9 @@ class Leader(object):
         if self.toilMetrics:
             self.toilMetrics.logIssuedJob(jobNode)
             self.toilMetrics.logQueueSize(self.getNumberOfJobsIssued())
+        # Tell the user there's another job to do
+        self.progress_overall.total += 1
+        self.progress_overall.update(incr=0)
 
     def issueJobs(self, jobs):
         """Add a list of jobs, each represented as a jobNode object."""
@@ -660,6 +731,33 @@ class Leader(object):
             assert len(self.jobBatchSystemIDToIssuedJob) >= self.preemptableJobsIssued
             return len(self.jobBatchSystemIDToIssuedJob) - self.preemptableJobsIssued
 
+    def _getStatusHint(self):
+        """
+        Get a short string describing the current state of the workflow for a human.
+        
+        Should include number of currently running jobs, number of issued jobs, etc.
+        
+        Don't call this too often; it will talk to the batch system, which may
+        make queries of the backing scheduler.
+        
+        :return: A one-line description of the current status of the workflow.
+        :rtype: str
+        """
+        
+        issuedJobCount = self.getNumberOfJobsIssued()
+        runningJobCount = len(self.batchSystem.getRunningBatchJobIDs())
+        
+        return "%d jobs are running, %d jobs are issued and waiting to run" % (runningJobCount, issuedJobCount - runningJobCount)
+        
+    def _reportWorkflowStatus(self):
+        """
+        Report the current status of the workflow to the user.
+        """
+        
+        # For now just log our scheduling status message to the log.
+        # TODO: make this update fast enought to put it in the progress
+        # bar/status line.
+        logger.info(self._getStatusHint())
 
     def removeJob(self, jobBatchSystemID):
         """Removes a job from the system."""
@@ -679,6 +777,9 @@ class Leader(object):
             else:
                 self.serviceJobsIssued -= 1
 
+        # Tell the user that job is done, for progress purposes.
+        self.progress_overall.update(incr=1)
+
         return jobNode
 
     def getJobs(self, preemptable=None):
@@ -689,12 +790,27 @@ class Leader(object):
 
     def killJobs(self, jobsToKill):
         """
-        Kills the given set of jobs and then sends them for processing
+        Kills the given set of jobs and then sends them for processing.
+        
+        Returns the jobs that, upon processing, were reissued.
         """
+        
+        # If we are rerunning a job we put the ID in this list.
+        jobsRerunning = []
+        
         if len(jobsToKill) > 0:
+            # Kill the jobs with the batch system. They will now no longer come in as updated.
             self.batchSystem.killBatchJobs(jobsToKill)
             for jobBatchSystemID in jobsToKill:
-                self.processFinishedJob(jobBatchSystemID, 1)
+                # Reissue immediately, noting that we killed the job
+                willRerun = self.processFinishedJob(jobBatchSystemID, 1, exitReason=BatchJobExitReason.KILLED)
+                
+                if willRerun:
+                    # Compose a list of all the jobs that will run again
+                    jobsRerunning.append(jobBatchSystemID)
+        
+        return jobsRerunning
+                    
 
     #Following functions handle error cases for when jobs have gone awry with the batch system.
 
@@ -710,39 +826,42 @@ class Leader(object):
             runningJobs = self.batchSystem.getRunningBatchJobIDs()
             for jobBatchSystemID in list(runningJobs.keys()):
                 if runningJobs[jobBatchSystemID] > maxJobDuration:
-                    logger.warn("The job: %s has been running for: %s seconds, more than the "
+                    logger.warning("The job: %s has been running for: %s seconds, more than the "
                                 "max job duration: %s, we'll kill it",
                                 str(self.jobBatchSystemIDToIssuedJob[jobBatchSystemID].jobStoreID),
                                 str(runningJobs[jobBatchSystemID]),
                                 str(maxJobDuration))
                     jobsToKill.append(jobBatchSystemID)
-            self.killJobs(jobsToKill)
+            reissued = self.killJobs(jobsToKill)
+            if len(jobsToKill) > 0:
+                # Summarize our actions
+                logger.info("Killed %d over long jobs and reissued %d of them", len(jobsToKill), len(reissued))
 
     def reissueMissingJobs(self, killAfterNTimesMissing=3):
         """
-        Check all the current job ids are in the list of currently running batch system jobs.
+        Check all the current job ids are in the list of currently issued batch system jobs.
         If a job is missing, we mark it as so, if it is missing for a number of runs of
         this function (say 10).. then we try deleting the job (though its probably lost), we wait
         then we pass the job to processFinishedJob.
         """
-        runningJobs = set(self.batchSystem.getIssuedBatchJobIDs())
+        issuedJobs = set(self.batchSystem.getIssuedBatchJobIDs())
         jobBatchSystemIDsSet = set(list(self.jobBatchSystemIDToIssuedJob.keys()))
         #Clean up the reissueMissingJobs_missingHash hash, getting rid of jobs that have turned up
         missingJobIDsSet = set(list(self.reissueMissingJobs_missingHash.keys()))
         for jobBatchSystemID in missingJobIDsSet.difference(jobBatchSystemIDsSet):
             self.reissueMissingJobs_missingHash.pop(jobBatchSystemID)
-            logger.warn("Batch system id: %s is no longer missing", str(jobBatchSystemID))
-        assert runningJobs.issubset(jobBatchSystemIDsSet) #Assert checks we have
+            logger.warning("Batch system id: %s is no longer missing", str(jobBatchSystemID))
+        assert issuedJobs.issubset(jobBatchSystemIDsSet) #Assert checks we have
         #no unexpected jobs running
         jobsToKill = []
-        for jobBatchSystemID in set(jobBatchSystemIDsSet.difference(runningJobs)):
+        for jobBatchSystemID in set(jobBatchSystemIDsSet.difference(issuedJobs)):
             jobStoreID = self.jobBatchSystemIDToIssuedJob[jobBatchSystemID].jobStoreID
             if jobBatchSystemID in self.reissueMissingJobs_missingHash:
                 self.reissueMissingJobs_missingHash[jobBatchSystemID] += 1
             else:
                 self.reissueMissingJobs_missingHash[jobBatchSystemID] = 1
             timesMissing = self.reissueMissingJobs_missingHash[jobBatchSystemID]
-            logger.warn("Job store ID %s with batch system id %s is missing for the %i time",
+            logger.warning("Job store ID %s with batch system id %s is missing for the %i time",
                         jobStoreID, str(jobBatchSystemID), timesMissing)
             if self.toilMetrics:
                 self.toilMetrics.logMissingJob()
@@ -755,13 +874,16 @@ class Leader(object):
 
     def processRemovedJob(self, issuedJob, resultStatus):
         if resultStatus != 0:
-            logger.warn("Despite the batch system claiming failure the "
+            logger.warning("Despite the batch system claiming failure the "
                         "job %s seems to have finished and been removed", issuedJob)
         self._updatePredecessorStatus(issuedJob.jobStoreID)
 
-    def processFinishedJob(self, batchSystemID, resultStatus, wallTime=None):
+    def processFinishedJob(self, batchSystemID, resultStatus, wallTime=None, exitReason=None):
         """
         Function reads a processed jobGraph file and updates its state.
+        
+        Return True if the job is going to run again, and False if the job is
+        fully done or completely failed.
         """
         jobNode = self.removeJob(batchSystemID)
         jobStoreID = jobNode.jobStoreID
@@ -779,7 +901,7 @@ class Leader(object):
                     # Process the job from here as any other job removed from the job store.
                     # This is a temporary work around until https://github.com/BD2KGenomics/toil/issues/1091
                     # is completed
-                    logger.warn('Got a stale read from SDB for job %s', jobNode)
+                    logger.warning('Got a stale read from SDB for job %s', jobNode)
                     self.processRemovedJob(jobNode, resultStatus)
                     return
                 else:
@@ -789,7 +911,7 @@ class Leader(object):
                     # more memory efficient than read().striplines() while leaving off the
                     # trailing \n left when using readlines()
                     # http://stackoverflow.com/a/15233739
-                    StatsAndLogging.logWithFormatting(jobStoreID, logFileStream, method=logger.warn,
+                    StatsAndLogging.logWithFormatting(jobStoreID, logFileStream, method=logger.warning,
                                                       message='The job seems to have left a log file, indicating failure: %s' % jobGraph)
                 if self.config.writeLogs or self.config.writeLogsGzip:
                     with jobGraph.getLogFileHandle(self.jobStore) as logFileStream:
@@ -799,22 +921,28 @@ class Leader(object):
                 # is assumed not to have captured the failure of the job, so we
                 # reduce the retry count here.
                 if jobGraph.logJobStoreFileID is None:
-                    logger.warn("No log file is present, despite job failing: %s", jobNode)
+                    logger.warning("No log file is present, despite job failing: %s", jobNode)
 
-                # Look for any standard output/error files created by the batch system
-                workflowDir = Toil.getWorkflowDir(self.config.workflowID, self.config.workDir)
-                batchSystemFilePrefix = 'toil_job_{}_batch_'.format(batchSystemID)
-                batchSystemFileGlob = os.path.join(workflowDir, batchSystemFilePrefix + '*.log')
+                # Look for any standard output/error files created by the batch system.
+                # They will only appear if the batch system actually supports
+                # returning logs to the machine that submitted jobs, or if
+                # --workDir / TOIL_WORKDIR is on a shared file system.
+                # They live directly in the Toil work directory because that is
+                # guaranteed to exist on the leader and workers.
+                workDir = Toil.getToilWorkDir(self.config.workDir)
+                # This must match the format in AbstractBatchSystem.formatStdOutErrPath()
+                batchSystemFilePrefix = 'toil_workflow_{}_job_{}_batch_'.format(self.config.workflowID, batchSystemID)
+                batchSystemFileGlob = os.path.join(workDir, batchSystemFilePrefix + '*.log')
                 batchSystemFiles = glob.glob(batchSystemFileGlob)
                 for batchSystemFile in batchSystemFiles:
                     try:
                         batchSystemFileStream = open(batchSystemFile, 'rb')
                     except:
-                        logger.warn('The batch system left a file %s, but it could not be opened' % batchSystemFile)
+                        logger.warning('The batch system left a file %s, but it could not be opened' % batchSystemFile)
                     else:
                         with batchSystemFileStream:
                             if os.path.getsize(batchSystemFile) > 0:
-                                StatsAndLogging.logWithFormatting(jobStoreID, batchSystemFileStream, method=logger.warn,
+                                StatsAndLogging.logWithFormatting(jobStoreID, batchSystemFileStream, method=logger.warning,
                                                                   message='The batch system left a non-empty file %s:' % batchSystemFile)
                                 if self.config.writeLogs or self.config.writeLogsGzip:
                                     batchSystemFileRoot, _ = os.path.splitext(os.path.basename(batchSystemFile))
@@ -825,10 +953,15 @@ class Leader(object):
                                     batchSystemFileStream.seek(0)
                                     StatsAndLogging.writeLogFiles(jobNames, batchSystemFileStream, self.config, failed=True)
                             else:
-                                logger.warn('The batch system left an empty file %s' % batchSystemFile)
+                                logger.warning('The batch system left an empty file %s' % batchSystemFile)
 
-                jobGraph.setupJobAfterFailure(self.config)
+                jobGraph.setupJobAfterFailure(self.config, exitReason=exitReason)
                 self.jobStore.update(jobGraph)
+                
+                # Show job as failed in progress (and take it from completed)
+                self.progress_overall.update(incr=-1)
+                self.progress_failed.update(incr=1)
+                
             elif jobStoreID in self.toilState.hasFailedSuccessors:
                 # If the job has completed okay, we can remove it from the list of jobs with failed successors
                 self.toilState.hasFailedSuccessors.remove(jobStoreID)
@@ -836,9 +969,15 @@ class Leader(object):
             self.toilState.updatedJobs.add((jobGraph, resultStatus)) #Now we know the
             #jobGraph is done we can add it to the list of updated jobGraph files
             logger.debug("Added job: %s to active jobs", jobGraph)
+            
+            # Return True if it will rerun (still has retries) and false if it
+            # is completely failed.
+            return jobGraph.remainingRetryCount > 0
         else:  #The jobGraph is done
             self.processRemovedJob(jobNode, resultStatus)
-
+            # Being done, it won't run again.
+            return False
+            
     @staticmethod
     def getSuccessors(jobGraph, alreadySeenSuccessors, jobStore):
         """

@@ -15,12 +15,15 @@ from __future__ import absolute_import
 
 import os
 
-__all__ = ['fileStore', 'nonCachingFileStore', 'cachingFileStore']
+__all__ = ['fileStore', 'nonCachingFileStore', 'cachingFileStore', 'FileID']
+
 
 class FileID(str):
     """
     A small wrapper around Python's builtin string class. It is used to represent a file's ID in the file store, and
     has a size attribute that is the file's size in bytes. This object is returned by importFile and writeGlobalFile.
+
+    Calls into the file store can use bare strings; size will be queried from the job store if unavailable in the ID.
     """
 
     def __new__(cls, fileStoreID, *args):
