@@ -182,7 +182,7 @@ def workerScript(jobStore, config, jobName, jobStoreID, redirectOutputToLogFile=
             # /bin, but the Toil appliance needs it.
             if i in os.environ and os.environ[i] != '':
                 # Use the provided PATH and then the local system's PATH
-                os.environ[i] = environment[i] + ':' + os.environ[i]
+                os.environ[i] = ":".join(set(environment[i].split(":") + os.environ[i].split(":")))
             else:
                 # Use the provided PATH only
                 os.environ[i] = environment[i]
