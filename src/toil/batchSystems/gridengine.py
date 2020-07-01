@@ -68,7 +68,7 @@ class GridEngineBatchSystem(AbstractGridEngineBatchSystem):
             result = int(process.stdout.readline().decode('utf-8').strip())
             return result
 
-        def getJobExitCode(self, sgeJobID):
+        def getJobExitCode(self, sgeJobID, jobID):
             # the task is set as part of the job ID if using getBatchSystemID()
             job, task = (sgeJobID, None)
             if '.' in sgeJobID:
@@ -80,13 +80,19 @@ class GridEngineBatchSystem(AbstractGridEngineBatchSystem):
                 args.extend(["-t", str(task)])
 
             logger.debug("Running %r", args)
+            iscurrtoiljob = False
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             for line in process.stdout:
                 if line.startswith("failed") and int(line.split()[1]) == 1:
                     return 1
-                elif line.startswith("exit_status"):
+                if line.startswith("jobname") and line.split()[1] == "toil_job_" + str(jobID):
+                    iscurrtoiljob = True
+                if iscurrtoiljob and line.startswith("exit_status"):
                     logger.debug('Exit Status: %r', line.split()[1])
                     return int(line.split()[1])
+                #elif line.startswith("exit_status"):
+                #    logger.debug('Exit Status: %r', line.split()[1])
+                #    return int(line.split()[1])
             return None
 
         """
@@ -104,7 +110,8 @@ class GridEngineBatchSystem(AbstractGridEngineBatchSystem):
             reqline = list()
             sgeArgs = os.getenv('TOIL_GRIDENGINE_ARGS')
             if mem is not None:
-                memStr = str(old_div(mem, 1024)) + 'K'
+                memStr = str(int(math.ceil(mem/(1024*math.ceil(cpu))))) + 'K'
+                # memStr = str(old_div(mem, 1024)) + 'K'
                 if not self.boss.config.manualMemArgs:
                     # for UGE instead of SGE; see #2309
                     reqline += ['vf=' + memStr, 'h_vmem=' + memStr]
@@ -137,7 +144,7 @@ class GridEngineBatchSystem(AbstractGridEngineBatchSystem):
 
     @classmethod
     def getWaitDuration(cls):
-        return 1
+        return 15
 
     @classmethod
     def obtainSystemConstants(cls):
