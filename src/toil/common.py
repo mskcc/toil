@@ -100,7 +100,7 @@ class Config(object):
         self.maxPreemptableServiceJobs = sys.maxsize
         self.maxServiceJobs = sys.maxsize
         self.deadlockWait = 60  # Number of seconds to wait before declaring a deadlock
-        self.statePollingWait = 1  # Number of seconds to wait before querying job state
+        self.statePollingWait = 300  # Number of seconds to wait before querying job state
 
         # Resource requirements
         self.defaultMemory = 2147483648
