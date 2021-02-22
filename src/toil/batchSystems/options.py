@@ -117,7 +117,7 @@ def addOptions(addOptionFn, config):
     addOptionFn("--coalesceStatusCalls", dest="coalesceStatusCalls",
                 action='store_true', default=None,
                 help=("Coalese status calls to prevent the batch system from being overloaded. "
-                      "Currently only supported for LSF."
+                      "Currently only supported for LSF. "
                       "default=false"))
     localCores = multiprocessing.cpu_count()
     addOptionFn("--maxLocalJobs", default=localCores,
