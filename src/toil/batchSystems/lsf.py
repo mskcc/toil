@@ -130,7 +130,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                 validLSFJobIds.append(job)
             if validLSFJobIds:
                 args = ["bjobs", "-json", "-o",
-                        "jobid user exit_code stat exit_reason pend_reason", lsfJobIDs.split(" ")]
+                        "jobid user exit_code stat exit_reason pend_reason", " ".join(map(str, validLSFJobIds))]
                 logger.debug("Getting coalesced job exit codes via bjobs")
                 process = subprocess.Popen(args, stdout=subprocess.PIPE,
                                            stderr=subprocess.STDOUT)
