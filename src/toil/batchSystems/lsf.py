@@ -130,7 +130,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                 validLSFJobIds.append(job)
             if validLSFJobIds:
                 args = ["bjobs", "-json", "-o",
-                        "jobid user exit_code stat exit_reason pend_reason", " ".join(map(str, validLSFJobIds))]
+                        "jobid user exit_code stat exit_reason pend_reason"] + validLSFJobIds
                 logger.debug("Getting coalesced job exit codes via bjobs")
                 process = subprocess.Popen(args, stdout=subprocess.PIPE,
                                            stderr=subprocess.STDOUT)
@@ -139,7 +139,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                 if bjobs_records:
                     for single_record in bjobs_records:
                         if "JOBID" in single_record:
-                            single_job_id = bjobs_records["JOBID"]
+                            single_job_id = single_record["JOBID"]
                             statusDict[single_job_id] = self.parseBjobsRecord(single_record, single_job_id)
             for singleLSFID in lsfJobIDs:
                 if "NOT_SUBMITTED" in singleLSFID:
