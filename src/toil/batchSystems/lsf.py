@@ -152,6 +152,7 @@ class LSFBatchSystem(AbstractGridEngineBatchSystem):
                         statusResponse.append(statusDict[job])
                     else:
                         statusResponse.append(None)
+            return statusResponse
 
 
         def getJobExitCode(self, lsfJobID):
