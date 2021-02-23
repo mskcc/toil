@@ -205,16 +205,35 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
                 return self._checkOnJobsCache
 
             activity = False
-            for jobID in list(self.runningJobs):
-                batchJobID = self.getBatchSystemID(jobID)
-                status = with_retries(self.getJobExitCode, batchJobID)
-                if status is not None:
-                    activity = True
-                    self.updatedJobsQueue.put((jobID, status))
-                    self.forgetJob(jobID)
+            statusObj = None
+            runningJobList = list(self.runningJobs)
+            if self.boss.config.coalesceStatusCalls:
+                batchJobIDList = list(map(self.getBatchSystemID,runningJobList))
+                if batchJobIDList:
+                    statuses = with_retries(self.coalesceJobExitCodes, batchJobIDList)
+                    if statuses is not None:
+                        for runningJobID, status in zip(runningJobList, statuses):
+                            activity = self._handleJobStatus(runningJobID,status,activity)
+            else:
+                for jobID in runningJobList:
+                    batchJobID = self.getBatchSystemID(jobID)
+                    status = with_retries(self.getJobExitCode, batchJobID)
+                    activity = self._handleJobStatus(jobID,status,activity)
             self._checkOnJobsCache = activity
             self._checkOnJobsTimestamp = datetime.now()
             return activity
+
+        def _handleJobStatus(self,jobID,status,activity):
+            """
+            Helper method for checkOnJobs to handle job statuses
+            """
+            if status is not None:
+                self.updatedJobsQueue.put((jobID, status))
+                self.forgetJob(jobID)
+                return True
+            else:
+                return activity
+
 
         def run(self):
             """
@@ -291,6 +310,17 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
             AbstractGridEngineWorker.checkOnJobs()
 
             :param string batchjobID: batch system job ID
+            """
+            raise NotImplementedError()
+
+        @abstractmethod
+        def coalesceJobExitCodes(self, batchJobIDList):
+            """
+            Returns exit codes for a list of jobs.
+            Implementation-specific; called by
+            AbstractGridEngineWorker.checkOnJobs()
+
+            :param string batchjobIDList: List of batch system job ID
             """
             raise NotImplementedError()
 

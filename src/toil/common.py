@@ -215,6 +215,7 @@ class Config(object):
         setOption("batchSystem")
         setBatchOptions(self, setOption)
         setOption("disableAutoDeployment")
+        setOption("coalesceStatusCalls")
         setOption("scale", float, fC(0.0))
         setOption("mesosMasterAddress")
         setOption("parasolCommand")

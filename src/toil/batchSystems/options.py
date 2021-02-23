@@ -114,6 +114,11 @@ def addOptions(addOptionFn, config):
                 help=("Should auto-deployment of the user script be deactivated? If True, the user "
                       "script/package should be present at the same location on all workers. "
                       "default=false"))
+    addOptionFn("--coalesceStatusCalls", dest="coalesceStatusCalls",
+                action='store_true', default=None,
+                help=("Coalese status calls to prevent the batch system from being overloaded. "
+                      "Currently only supported for LSF. "
+                      "default=false"))
     localCores = multiprocessing.cpu_count()
     addOptionFn("--maxLocalJobs", default=localCores,
                 help="For batch systems that support a local queue for "
@@ -148,6 +153,7 @@ def setDefaultOptions(config):
     config.statePollingWait = 300  # if not set, will default to seconds in getWaitDuration()
     config.maxLocalJobs = multiprocessing.cpu_count()
     config.manualMemArgs = False
+    config.coalesceStatusCalls = False
 
     # single machine
     config.scale = 1
