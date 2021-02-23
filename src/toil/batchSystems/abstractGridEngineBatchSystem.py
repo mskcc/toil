@@ -208,7 +208,7 @@ class AbstractGridEngineBatchSystem(BatchSystemLocalSupport):
             statusObj = None
             runningJobList = list(self.runningJobs)
             if self.boss.config.coalesceStatusCalls:
-                batchJobIDList = map(self.getBatchSystemID,runningJobList)
+                batchJobIDList = list(map(self.getBatchSystemID,runningJobList))
                 if batchJobIDList:
                     statuses = with_retries(self.coalesceJobExitCodes, batchJobIDList)
                     if statuses is not None:
