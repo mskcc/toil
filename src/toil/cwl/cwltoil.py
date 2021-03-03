@@ -130,7 +130,10 @@ class MergeInputsFlattened(MergeInputs):
         result = []
         for promise in self.sources:
             if isinstance(promise, tuple):
-                source = promise[1][0][promise[0]]
+                if isinstance(promise[1], dict):
+                    source = promise[1][promise[0]]
+                else:
+                    source = promise[1][0][promise[0]]
             else:
                 source = promise[1][promise[0]]
             if isinstance(source, MutableSequence):
