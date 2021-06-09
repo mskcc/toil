@@ -18,6 +18,7 @@ import inspect
 import itertools
 import logging
 import os
+import psutil
 import pickle
 import shutil
 import tempfile
@@ -2292,7 +2293,11 @@ class Job:
         if stats is not None:
             startTime = time.time()
             startClock = get_total_cpu_time()
-        baseDir = os.getcwd()
+
+        try:
+            baseDir = os.getcwd()
+        except FileNotFoundError as fileError:
+            baseDir = psutil.Process(os.getpid()).cwd()
 
         yield
 
@@ -2311,7 +2316,13 @@ class Job:
         # Now indicate the asynchronous update of the job can happen
         fileStore.startCommit(jobState=True)
         # Change dir back to cwd dir, if changed by job (this is a safety issue)
-        if os.getcwd() != baseDir:
+        try:
+            currentDir = os.getcwd()
+        except FileNotFoundError as fileError:
+            currentDir = psutil.Process(os.getpid()).cwd()
+        if currentDir != baseDir:
+            if not os.path.exists(baseDir):
+                os.makedirs(baseDir)
             os.chdir(baseDir)
         # Finish up the stats
         if stats is not None:
