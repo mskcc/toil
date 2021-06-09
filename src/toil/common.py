@@ -18,6 +18,7 @@ import re
 import requests
 import subprocess
 import sys
+import psutil
 import tempfile
 import time
 import uuid
@@ -1381,6 +1382,19 @@ def fC(minValue, maxValue=None):
         assert isinstance(maxValue, float)
         return lambda x: minValue <= x < maxValue
 
+def safeGetCurrentDir():
+    # Get current dir and handle FileNotFoundError exception
+    try:
+        baseDir = os.getcwd()
+    except FileNotFoundError as fileError:
+        baseDir = psutil.Process(os.getpid()).cwd()
+    return baseDir
+
+def safeChangeDir(dirPath):
+    # Change current dir and handle case where the folder does not exist
+    if not os.path.exists(dirPath):
+        os.makedirs(dirPath)
+    os.chdir(dirPath)
 
 def cacheDirName(workflowID):
     """

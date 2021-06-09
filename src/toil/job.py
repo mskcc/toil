@@ -18,7 +18,6 @@ import inspect
 import itertools
 import logging
 import os
-import psutil
 import pickle
 import shutil
 import tempfile
@@ -32,7 +31,7 @@ from typing import Dict, Optional, Union, Set
 
 import dill
 
-from toil.common import Config, Toil, addOptions, safeUnpickleFromStream
+from toil.common import Config, Toil, addOptions, safeUnpickleFromStream, safeGetCurrentDir, safeChangeDir
 from toil.deferred import DeferredFunction
 from toil.fileStores import FileID
 from toil.lib.expando import Expando
@@ -2294,10 +2293,7 @@ class Job:
             startTime = time.time()
             startClock = get_total_cpu_time()
 
-        try:
-            baseDir = os.getcwd()
-        except FileNotFoundError as fileError:
-            baseDir = psutil.Process(os.getpid()).cwd()
+        baseDir = safeGetCurrentDir()
 
         yield
 
@@ -2316,14 +2312,9 @@ class Job:
         # Now indicate the asynchronous update of the job can happen
         fileStore.startCommit(jobState=True)
         # Change dir back to cwd dir, if changed by job (this is a safety issue)
-        try:
-            currentDir = os.getcwd()
-        except FileNotFoundError as fileError:
-            currentDir = psutil.Process(os.getpid()).cwd()
+        currentDir = safeGetCurrentDir()
         if currentDir != baseDir:
-            if not os.path.exists(baseDir):
-                os.makedirs(baseDir)
-            os.chdir(baseDir)
+            safeChangeDir(baseDir)
         # Finish up the stats
         if stats is not None:
             totalCpuTime, totalMemoryUsage = get_total_cpu_time_and_memory_usage()

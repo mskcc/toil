@@ -21,7 +21,7 @@ from typing import Callable, Dict, Optional, Generator
 
 import dill
 
-from toil.common import getDirSizeRecursively, getFileSystemSize
+from toil.common import getDirSizeRecursively, getFileSystemSize, safeGetCurrentDir, safeChangeDir
 from toil.fileStores import FileID
 from toil.fileStores.abstractFileStore import AbstractFileStore
 from toil.jobStores.abstractJobStore import AbstractJobStore
@@ -44,7 +44,7 @@ class NonCachingFileStore(AbstractFileStore):
     @contextmanager
     def open(self, job: Job) -> Generator[None, None, None]:
         jobReqs = job.disk
-        startingDir = os.getcwd()
+        startingDir = safeGetCurrentDir()
         self.localTempDir = make_public_dir(in_directory=self.localTempDir)
         self._removeDeadJobs(self.workDir)
         self.jobStateFile = self._createJobStateFile()
@@ -66,7 +66,7 @@ class NonCachingFileStore(AbstractFileStore):
                                  level=logging.WARNING)
             else:
                 self.logToMaster(disk_usage, level=logging.DEBUG)
-            os.chdir(startingDir)
+            safeChangeDir(startingDir)
             # Finally delete the job from the worker
             os.remove(self.jobStateFile)
 
