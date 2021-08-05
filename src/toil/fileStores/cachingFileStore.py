@@ -25,7 +25,7 @@ import time
 from contextlib import contextmanager
 from typing import Callable, Generator, Optional
 
-from toil.common import cacheDirName, getDirSizeRecursively, getFileSystemSize
+from toil.common import cacheDirName, getDirSizeRecursively, getFileSystemSize, safeGetCurrentDir, safeChangeDir
 from toil.fileStores import FileID
 from toil.fileStores.abstractFileStore import AbstractFileStore
 from toil.jobStores.abstractJobStore import AbstractJobStore
@@ -968,7 +968,7 @@ class CachingFileStore(AbstractFileStore):
         before and after the execution of a job in worker.py
         """
         # Create a working directory for the job
-        startingDir = os.getcwd()
+        startingDir = safeGetCurrentDir()
         # Move self.localTempDir from the worker directory set up in __init__ to a per-job directory.
         self.localTempDir = make_public_dir(in_directory=self.localTempDir)
         # Check the status of all jobs on this node. If there are jobs that started and died before
@@ -984,7 +984,7 @@ class CachingFileStore(AbstractFileStore):
         # from the cache to make room before letting the job run.
         self._allocateSpaceForJob(self.jobDiskBytes)
         try:
-            os.chdir(self.localTempDir)
+            safeChangeDir(self.localTempDir)
             with super().open(job):
                 yield
         finally:
@@ -1005,7 +1005,7 @@ class CachingFileStore(AbstractFileStore):
                 self.logToMaster(disk_usage, level=logging.DEBUG)
 
             # Go back up to the per-worker local temp directory.
-            os.chdir(startingDir)
+            safeChangeDir(startingDir)
             self.cleanupInProgress = True
 
             # Record that our job is no longer using its space, and clean up
