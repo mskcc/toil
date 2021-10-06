@@ -1019,7 +1019,7 @@ class Leader(object):
                             else:
                                 logger.warning('The batch system left an empty file %s' % batchSystemFile)
 
-                replacementJob.setupJobAfterFailure(exitReason=exitReason)
+                replacementJob.setupJobAfterFailure(exitStatus=resultStatus)
                 self.jobStore.update(replacementJob)
 
                 # Show job as failed in progress (and take it from completed)
