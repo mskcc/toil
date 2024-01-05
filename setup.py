@@ -33,6 +33,7 @@ def run_setup():
     gcs = 'google-cloud-storage==1.6.0'
     gcs_oauth2_boto_plugin = 'gcs_oauth2_boto_plugin==1.14'
     apacheLibcloud = 'apache-libcloud==2.2.1'
+    rdflibJsonld = 'git+https://github.com/mskcc/rdflib-jsonld.git@0.5.1'
     cwltool = 'cwltool==3.0.20201203173111'
     galaxyToolUtil = 'galaxy-tool-util'
     htcondor = 'htcondor>=8.6.0'
@@ -64,6 +65,7 @@ def run_setup():
         futures,
         pycryptodome]
     cwl_reqs = [
+        rdflibJsonld,
         cwltool,
         galaxyToolUtil]
     encryption_reqs = [
