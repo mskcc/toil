@@ -55,6 +55,9 @@ class SlurmBatchSystem(AbstractGridEngineBatchSystem):
         def prepareSubmission(self, cpu, memory, jobID, command, jobName):
             return self.prepareSbatch(cpu, memory, jobID, jobName) + ['--wrap={}'.format(command)]
 
+        def coalesceJobExitCodes(self,slurmJobIDs):
+            raise NotImplementedError("Coalesce job status for Slurm not yet supported")
+
         def submitJob(self, subLine):
             try:
                 output = call_command(subLine)
